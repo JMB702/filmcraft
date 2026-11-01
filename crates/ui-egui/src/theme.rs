@@ -157,8 +157,10 @@ impl Tokens {
             app_bg: Color32::from_rgb(0, 0, 0),
             header_bg: Color32::from_rgb(0x1d, 0x1d, 0x1d),
             panel_bg: Color32::from_rgb(0x1d, 0x1d, 0x1d),
-            tab_bg: Color32::from_rgb(0x1d, 0x1d, 0x1d),
-            tab_text: Color32::from_rgb(0xb0, 0xb0, 0xb0),
+            // The tab strip sits darker than the panels so the active tab, drawn in the panel's
+            // colour, joins its body; the inactive labels are dimmer than the active one too.
+            tab_bg: Color32::from_rgb(0x10, 0x10, 0x10),
+            tab_text: Color32::from_rgb(0x96, 0x96, 0x96),
             tab_text_active: Color32::from_rgb(0xd1, 0xd1, 0xd1),
             focus: Color32::from_rgb(0x57, 0x94, 0xec),
             accent: Color32::from_rgb(0x2f, 0x6b, 0xdf),
@@ -247,7 +249,7 @@ impl Tokens {
                 app_bg: Color32::from_rgb(20, 20, 20),
                 header_bg: Color32::from_rgb(0x32, 0x32, 0x32),
                 panel_bg: Color32::from_rgb(0x32, 0x32, 0x32),
-                tab_bg: Color32::from_rgb(0x32, 0x32, 0x32),
+                tab_bg: Color32::from_rgb(0x26, 0x26, 0x26),
                 field_bg: Color32::from_rgb(0x22, 0x22, 0x22),
                 tl_bg: Color32::from_rgb(0x32, 0x32, 0x32),
                 tl_track_bg: Color32::from_rgb(0x32, 0x32, 0x32),
@@ -263,7 +265,7 @@ impl Tokens {
                 app_bg: Color32::from_rgb(180, 180, 180),
                 header_bg: Color32::from_rgb(214, 214, 214),
                 panel_bg: Color32::from_rgb(232, 232, 232),
-                tab_bg: Color32::from_rgb(232, 232, 232),
+                tab_bg: Color32::from_rgb(214, 214, 214),
                 tab_text: Color32::from_rgb(90, 90, 90),
                 tab_text_active: Color32::from_rgb(20, 20, 20),
                 text: Color32::from_rgb(34, 34, 34),
@@ -573,6 +575,25 @@ mod tests {
             assert_eq!(t.keyframe_plot_grid, Color32::from_gray(0x2a));
             assert_eq!(t.keyframe_plot_axis, Color32::from_gray(0x33));
             assert_eq!(t.keyframe_handle, Color32::from_gray(0xd0));
+        }
+    }
+
+    /// A tab group's active tab is drawn in the panel colour and the others on the tab strip, so
+    /// the two must differ clearly in every theme, accessible contrast included (which makes the
+    /// inactive labels as bright as the active one).
+    #[test]
+    fn the_active_panel_tab_stands_out_from_the_others() {
+        let luminance = |c: Color32| i32::from(c.r()) + i32::from(c.g()) + i32::from(c.b());
+        for kind in [ThemeKind::Dark, ThemeKind::Medium, ThemeKind::Light] {
+            for accessible in [false, true] {
+                let t = Tokens::for_kind(kind).with_appearance(None, accessible);
+                let fill = (luminance(t.panel_bg) - luminance(t.tab_bg)).abs();
+                assert!(fill >= 36, "{kind:?} accessible={accessible}: active tab fill too close to the strip ({fill})");
+                if !accessible {
+                    let text = (luminance(t.tab_text_active) - luminance(t.tab_text)).abs();
+                    assert!(text >= 120, "{kind:?}: active tab label too close to the others ({text})");
+                }
+            }
         }
     }
 
