@@ -112,3 +112,105 @@ fn importing_a_premiere_project_merges_it_into_a_bin() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The native file host, except that `shot.mov` is a cloud placeholder: it is there (its size is
+/// known) but every read of its contents is refused, as `FileReader` refuses an evicted iCloud
+/// file instead of waiting for its download.
+struct CloudPlaceholder;
+
+impl CloudPlaceholder {
+    fn evicted(path: &str) -> bool {
+        path.ends_with("shot.mov")
+    }
+}
+
+impl crate::Services for CloudPlaceholder {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        if Self::evicted(path) { Err(filmcraft_media::reader::not_downloaded()) } else { crate::FsServices.read_file(path) }
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        crate::FsServices.write_file(path, data)
+    }
+    fn file_size(&self, path: &str) -> std::io::Result<u64> {
+        crate::FsServices.file_size(path)
+    }
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        if Self::evicted(path) { Err(filmcraft_media::reader::not_downloaded()) } else { crate::FsServices.read_range(path, offset, len) }
+    }
+    fn reader(&self, path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+        if Self::evicted(path) { Some(Err(filmcraft_media::reader::not_downloaded())) } else { crate::FsServices.reader(path) }
+    }
+}
+
+#[test]
+fn media_stored_in_icloud_opens_offline_without_being_read() {
+    use filmcraft_render::offline::{OfflineReason, slate_rgba8};
+    let (d, path) = moved_project("prproj-icloud");
+    let mut s = Session::new(std::sync::Arc::new(CloudPlaceholder));
+    let r = s.execute("file.open", json!({"path": path})).unwrap();
+    assert_eq!((r["imported"]["linkedMedia"].as_u64(), r["notDownloaded"].as_u64()), (Some(0), Some(1)), "{r}");
+    assert_eq!(r["imported"]["offlineMedia"].as_array().map(Vec::len), Some(1), "{r}");
+    let report: Vec<&str> = r["imported"]["report"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert!(report.contains(&"shot.mov: stored in iCloud, not downloaded"), "{report:?}");
+    // the file is there, so Link Media does not ask for it; the item says why it is offline
+    assert!(!s.offline.prompt);
+    let shot = s.project.items.values().find(|i| i.name == "shot.mov").map(|i| i.id).unwrap();
+    assert_eq!(s.media.offline_status(shot).map(|o| o.reason), Some(OfflineReason::NotDownloaded));
+    let st = s.execute("media.status", json!({"item": shot.0})).unwrap();
+    assert_eq!(st[0]["status"], json!("notDownloaded"), "{st}");
+    assert!(
+        s.events.iter().any(|e| matches!(e, crate::Event::Toast { message, .. } if message.contains("stored in iCloud and not downloaded"))),
+        "the open says so"
+    );
+    // its clips draw the not-downloaded slate
+    let src = s.media.source_for(&s.project, shot, &*s.services).unwrap();
+    let f = src.video_frame(filmcraft_media::FrameRequest { time: filmcraft_time::Tick(0), scale: 1.0 }).unwrap();
+    assert_eq!(f.to_rgba8(), slate_rgba8(f.width as usize, f.height as usize, "shot.mov", OfflineReason::NotDownloaded));
+    // importing it into an open project reports it the same way
+    let mut s = Session::new(std::sync::Arc::new(CloudPlaceholder));
+    let r = s.execute("file.import", json!({"paths": [path]})).unwrap();
+    assert!(r.to_string().contains("shot.mov: stored in iCloud, not downloaded"), "{r}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The native file host, except that reading `shot.mov` stalls for two seconds (a network share
+/// that stopped answering).
+struct StalledShare;
+
+impl crate::Services for StalledShare {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        crate::FsServices.read_file(path)
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        crate::FsServices.write_file(path, data)
+    }
+    fn file_size(&self, path: &str) -> std::io::Result<u64> {
+        crate::FsServices.file_size(path)
+    }
+    fn reader(&self, path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+        if path.ends_with("shot.mov") {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        crate::FsServices.reader(path)
+    }
+}
+
+#[test]
+fn a_stalled_media_file_does_not_hold_the_open() {
+    let (d, path) = moved_project("prproj-stalled");
+    let mut s = Session::new(std::sync::Arc::new(StalledShare));
+    let bytes = std::fs::read(&path).unwrap();
+    let format = filmcraft_interchange::Format::Prproj;
+    let parsed = crate::interchange::parse(&mut s, &path, &bytes, format).unwrap();
+    let started = std::time::Instant::now();
+    let r = crate::interchange::merge_within(&mut s, &path, format, parsed, None, std::time::Duration::from_millis(200)).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_millis(1500), "waited {:?}", started.elapsed());
+    assert_eq!(r["deferredMedia"].as_array().map(Vec::len), Some(1), "{r}");
+    assert_eq!(r["linkedMedia"], 0, "{r}");
+    assert!(r["report"].to_string().contains("took too long to open"), "{r}");
+    // the item is not offline: it opens when it is played
+    let shot = s.project.items.values().find(|i| i.name == "shot.mov").map(|i| i.id).unwrap();
+    assert!(s.media.offline_status(shot).is_none());
+    assert!(shot_path(&s).is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}

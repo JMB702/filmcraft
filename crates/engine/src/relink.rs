@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use filmcraft_media::MediaInfo;
 use filmcraft_project::{ItemId, ItemKind, MediaIdentity, MediaRef, Project};
+use filmcraft_render::offline::OfflineReason;
 use filmcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -610,7 +611,7 @@ fn status_json(s: &Session, id: ItemId) -> Option<Value> {
         Some(_) if m.offline => "offline",
         Some(p) if s.media.follow(p).ok().is_none_or(|file| s.services.file_size(&file).is_err()) => "missing",
         Some(_) => match s.media.offline_status(id) {
-            Some(o) if o.reason == filmcraft_render::offline::OfflineReason::Unreadable => "unreadable",
+            Some(o) if matches!(o.reason, OfflineReason::Unreadable | OfflineReason::NotDownloaded) => crate::media_pool::offline_status_word(o.reason),
             _ => "online",
         },
     };
@@ -791,5 +792,18 @@ pub fn on_open(s: &mut Session) -> usize {
     if missing > 0 {
         s.toast(format!("{missing} media file(s) are missing; File > Link Media… reconnects them"));
     }
+    // cloud placeholders are not missing (relinking would not help): they wait for a download
+    let in_cloud = not_downloaded(s).len();
+    if in_cloud > 0 {
+        s.toast(format!(
+            "{in_cloud} media file(s) are stored in iCloud and not downloaded, so they show offline; download them in Finder, then reopen the project"
+        ));
+    }
     list.len()
+}
+
+/// Media items the pool found to be cloud placeholders ([`OfflineReason::NotDownloaded`]), in
+/// item order.
+pub fn not_downloaded(s: &Session) -> Vec<ItemId> {
+    s.project.items.keys().copied().filter(|&id| s.media.offline_status(id).is_some_and(|o| o.reason == OfflineReason::NotDownloaded)).collect()
 }

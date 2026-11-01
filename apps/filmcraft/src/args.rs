@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 /// `filmcraft --help`.
 pub const USAGE: &str = "\
-Usage: filmcraft [options] [project.fcproj | media files...]
+Usage: filmcraft [options] [project.fcproj | project.prproj | media files...]
 
 Options:
   --control <port>   start the localhost JSON-lines control server
@@ -119,10 +119,11 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
     Ok(Cli::Run(l))
 }
 
-/// Whether a launch file is a FilmCraft project. The extension's case does not matter: Windows file
+/// Whether a launch file is a project to open: a FilmCraft project, or a Premiere Pro project
+/// (`file.open` converts it into a new one). The extension's case does not matter: Windows file
 /// associations and the Linux MIME glob start the app for `CUT.FCPROJ` too (#850).
 pub fn is_project(path: &str) -> bool {
-    Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj"))
+    Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj") || e.eq_ignore_ascii_case("prproj"))
 }
 
 /// `path` made absolute against the working directory, so a project or media file named relative
@@ -274,6 +275,19 @@ mod tests {
         for p in ["cut.mp4", "fcproj", ".fcproj", "a.fcproj.mov", "a.fcprojx", ""] {
             assert!(!is_project(p), "{p}");
         }
+    }
+
+    /// A Premiere project given at launch was imported as a media file instead of opened.
+    #[test]
+    fn a_premiere_project_given_at_launch_is_opened() {
+        for p in ["show.prproj", "/Edits/Show Cut.PRPROJ", r"C:\Edits\show.PrProj"] {
+            assert!(is_project(p), "{p}");
+        }
+        for p in ["prproj", "a.prproj.mov", "a.prprojx"] {
+            assert!(!is_project(p), "{p}");
+        }
+        let (project, media) = project_and_media(&["/e/show.prproj".to_string(), "/e/a.mp4".to_string()]);
+        assert_eq!((project.as_deref(), media), (Some("/e/show.prproj"), vec!["/e/a.mp4".to_string()]));
     }
 
     /// Relative launch paths were opened and imported as given, so the project's media paths and

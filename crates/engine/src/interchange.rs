@@ -31,6 +31,29 @@ fn report_json(r: &filmcraft_interchange::Report) -> Vec<String> {
     r.entries.iter().map(|e| if e.count > 1 { format!("{} (×{})", e.message, e.count) } else { e.message.clone() }).collect()
 }
 
+/// How long an import may spend opening its media files, together. The files are probed on the
+/// thread that runs the command (the UI thread for File > Open), so a file on a stalled network
+/// share must not hold it: past this, the remaining files are left to open when they are played
+/// (frames are rendered on worker threads), as a saved project's files are.
+pub const LINK_MEDIA_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Open `file` on a helper thread, waiting at most `wait`. None: it took longer (the helper
+/// finishes or stays blocked on its own; its result is dropped). Hosts that cannot start threads
+/// (the browser) open it here.
+fn open_within(s: &Session, file: &str, wait: std::time::Duration) -> Option<std::result::Result<filmcraft_media::SharedSource, filmcraft_media::MediaError>> {
+    let (pool, services, owned) = (s.media.clone(), s.services.clone(), file.to_string());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let job = move || {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.open_file(&owned, &*services)))
+            .unwrap_or_else(|_| Err(filmcraft_media::MediaError::Decode(format!("{owned}: the opener failed"))));
+        let _ = tx.send(r);
+    };
+    if std::thread::Builder::new().name("filmcraft-link-media".into()).spawn(job).is_err() {
+        return Some(s.media.open_file(file, &*s.services));
+    }
+    rx.recv_timeout(wait).ok()
+}
+
 fn is_file_media(item: &filmcraft_project::ProjectItem) -> bool {
     matches!(&item.kind, ItemKind::Media(m) if matches!(m.media, MediaRef::File { .. }))
 }
@@ -133,6 +156,11 @@ pub fn parse(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Resul
 
 /// Merge a read document into the project and link its media (see [`import`]).
 pub fn merge(s: &mut Session, path: &str, format: Format, parsed: Parsed, bin: Option<BinId>) -> Result<Value> {
+    merge_within(s, path, format, parsed, bin, LINK_MEDIA_BUDGET)
+}
+
+/// [`merge`], spending at most `budget` opening the media files.
+pub(crate) fn merge_within(s: &mut Session, path: &str, format: Format, parsed: Parsed, bin: Option<BinId>, budget: std::time::Duration) -> Result<Value> {
     let Parsed { fragment, report, name } = parsed;
     let before: std::collections::HashSet<ItemId> = s.project.items.keys().copied().collect();
     let seqs = s.edit(&format!("Import {name}"), |proj, _| {
@@ -163,6 +191,9 @@ pub fn merge(s: &mut Session, path: &str, format: Format, parsed: Parsed, bin: O
     s.media.add_stored_paths(new_media.iter().map(|(_, p)| p.clone()), Some(path));
     let mut linked = 0;
     let mut offline = Vec::new();
+    let mut deferred = Vec::new();
+    let mut report = report_json(&report);
+    let deadline = web_time::Instant::now() + budget;
     for (id, mpath) in new_media {
         let file = match s.media.follow(&mpath) {
             Ok(file) => file,
@@ -172,8 +203,14 @@ pub fn merge(s: &mut Session, path: &str, format: Format, parsed: Parsed, bin: O
                 continue;
             }
         };
-        match s.media.open_file(&file, &*s.services).ok() {
-            Some(src) => {
+        let wait = deadline.saturating_duration_since(web_time::Instant::now());
+        let opened = if wait.is_zero() { None } else { open_within(s, &file, wait) };
+        let Some(opened) = opened else {
+            deferred.push(mpath);
+            continue;
+        };
+        match opened {
+            Ok(src) => {
                 let info = src.info().clone();
                 let identity = crate::relink::identity_of(&*s.services, &file).ok();
                 let rebase = (format == Format::Edl).then_some(info.start_timecode).flatten();
@@ -196,8 +233,20 @@ pub fn merge(s: &mut Session, path: &str, format: Format, parsed: Parsed, bin: O
                 s.media.insert_file(id, &mpath, src);
                 linked += 1;
             }
-            None => offline.push(mpath),
+            Err(e) => {
+                // a cloud placeholder was not read (that would wait for its download): say so
+                let reason = crate::media_pool::offline_reason(&e);
+                if reason == filmcraft_render::offline::OfflineReason::NotDownloaded {
+                    report.push(e.to_string());
+                }
+                s.media.set_offline(id, reason, &mpath, &e.to_string());
+                offline.push(mpath);
+            }
         }
+    }
+    if !deferred.is_empty() {
+        log::warn!("media not probed within {budget:?}, opened when played: {}", deferred.join(", "));
+        report.push(format!("{} media file(s) took too long to open; they open when played", deferred.len()));
     }
     if let Some(&first) = seqs.first() {
         s.state.active_sequence = Some(first);
@@ -210,7 +259,8 @@ pub fn merge(s: &mut Session, path: &str, format: Format, parsed: Parsed, bin: O
         "sequences": seqs.iter().map(|i| i.0).collect::<Vec<_>>(),
         "linkedMedia": linked,
         "offlineMedia": offline,
-        "report": report_json(&report),
+        "deferredMedia": deferred,
+        "report": report,
     }))
 }
 

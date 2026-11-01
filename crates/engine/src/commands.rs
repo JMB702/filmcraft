@@ -5241,8 +5241,9 @@ fn open_premiere(s: &mut Session, path: &str, bytes: &[u8]) -> Result<Value> {
         s.events.push(crate::Event::OpenSequence(seq));
     }
     let missing = crate::relink::on_open(s);
+    let not_downloaded = crate::relink::not_downloaded(s).len();
     s.toast(format!("Opened Premiere Pro project \"{name}\" as a new project; save it to keep a FilmCraft copy"));
-    Ok(json!({"path": path, "format": format.name(), "imported": imported, "missingMedia": missing}))
+    Ok(json!({"path": path, "format": format.name(), "imported": imported, "missingMedia": missing, "notDownloaded": not_downloaded}))
 }
 
 /// Load a recovery candidate (newest when `id` is None) as the current, unsaved project.

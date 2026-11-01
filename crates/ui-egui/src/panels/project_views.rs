@@ -55,7 +55,11 @@ pub fn media_badge(app: &FilmcraftApp, it: &filmcraft_project::ProjectItem) -> B
         (b.offline, b.offline_text) = (true, tl!("Media missing"));
     } else if let Some(st) = app.session.media.offline_status(id) {
         b.offline = true;
-        b.offline_text = if st.reason == filmcraft_render::offline::OfflineReason::Unreadable { tl!("Unreadable") } else { tl!("Media missing") };
+        b.offline_text = match st.reason {
+            filmcraft_render::offline::OfflineReason::Unreadable => tl!("Unreadable"),
+            filmcraft_render::offline::OfflineReason::NotDownloaded => tl!("In iCloud"),
+            _ => tl!("Media missing"),
+        };
     }
     b.proxy = m.proxy.is_some();
     b.proxy_on = app.session.media.use_proxies();
