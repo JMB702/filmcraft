@@ -40,6 +40,8 @@ pub enum Icon {
     Lift,
     Extract,
     Camera,
+    /// Toggle Multi-Camera View: four camera frames in a 2×2 grid, the live one filled.
+    Multicam,
     Loop,
     Wrench,
     Plus,
@@ -431,6 +433,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Camera => {
             pen.closed(&[(2.0, 5.0), (5.0, 5.0), (6.0, 3.5), (10.0, 3.5), (11.0, 5.0), (14.0, 5.0), (14.0, 12.5), (2.0, 12.5)]);
             pen.circle(8.0, 8.7, 2.3);
+        }
+        Multicam => {
+            pen.rect_fill(1.5, 2.5, 7.0, 7.0);
+            pen.rect(9.0, 2.5, 14.5, 7.0);
+            pen.rect(1.5, 9.0, 7.0, 13.5);
+            pen.rect(9.0, 9.0, 14.5, 13.5);
         }
         Loop => {
             pen.arc(8.0, 8.0, 5.0, 200.0, 520.0);
@@ -861,6 +869,7 @@ mod tests {
         Lift,
         Extract,
         Camera,
+        Multicam,
         Loop,
         Wrench,
         Plus,

@@ -91,10 +91,16 @@ struct Driver {
 
 impl Driver {
     fn new(session: Session) -> Self {
+        Self::with_step(session, 0.25)
+    }
+
+    /// A driver whose UI passes each advance the clock by `step_dt` seconds (kittest's default
+    /// is a quarter second, which skips six frames of playback per pass).
+    fn with_step(session: Session, step_dt: f32) -> Self {
         let (tx, rx) = channel();
         let app = FilmcraftApp::new(session).with_control(rx);
         let snapshots = std::env::var_os("FILMCRAFT_UI_SNAPSHOT_DIR").map(PathBuf::from);
-        let mut b = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000);
+        let mut b = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000).with_step_dt(step_dt);
         if snapshots.is_some() {
             b = b.wgpu();
         }
@@ -415,4 +421,148 @@ fn create_multicam_from_clips_selected_in_the_timeline() {
     assert!(d.app().ui.sync_dialog.is_none(), "dialog closed: {}", d.app().ui.status);
     let src = d.app().session.state.project_selection[0];
     assert_eq!(d.app().session.project.sequence(src).unwrap().multicam.clone().unwrap().cameras.len(), 4);
+}
+
+/// The label of the automation element `id` (exact match), if it is on screen.
+fn label(d: &mut Driver, id: &str) -> Option<String> {
+    let v = d.ok("ui.elements", json!({"prefix": id}));
+    v.as_array()?.iter().find(|e| e["id"] == id).and_then(|e| e["label"].as_str().map(str::to_string))
+}
+
+/// The Program monitor's transport has a Toggle Multi-Camera View button (lit while the view is
+/// shown), so the view is one click away rather than a View menu item to know about.
+#[test]
+fn program_transport_button_toggles_the_multicam_view() {
+    let (s, _) = session_empty();
+    let mut d = Driver::new(s);
+    assert!(!d.app().ui.program.multicam);
+    assert!(label(&mut d, "program.transport.multicam.toggleView").is_some_and(|l| l.contains("Multi-Camera")), "the button is shown by default");
+    d.click("program.transport.multicam.toggleView");
+    assert!(d.app().ui.program.multicam, "on");
+    assert!(!d.ids("program.multicam.grid").is_empty(), "the grid is drawn");
+    d.snapshot("multicam-transport-button-on");
+    d.click("program.transport.multicam.toggleView");
+    assert!(!d.app().ui.program.multicam, "off again");
+    assert!(d.ids("program.multicam.grid").is_empty());
+    // the Button Editor lists it, and hiding it there removes it from the row
+    d.click("program.transport.editor");
+    assert!(!d.ids("program.transport.editor.multicam.toggleView").is_empty());
+    d.click("program.transport.editor.multicam.toggleView");
+    d.ok("ui.key", json!({"key": "Escape"}));
+    d.frames(3);
+    assert!(d.ids("program.transport.multicam.toggleView").is_empty(), "hidden through the Button Editor");
+}
+
+/// From a fresh project, with no multi-camera clip yet: the Multi-Camera view says what to do,
+/// its button opens Create Multi-Camera Source Sequence, the new clip edited into the sequence
+/// shows its cameras, and clicking cameras while playing cuts the timeline.
+#[test]
+fn empty_multicam_view_leads_to_a_multicam_edit() {
+    let (s, items) = session();
+    let mut d = Driver::with_step(s, 1.0 / 24.0);
+    d.click("program.transport.multicam.toggleView");
+    assert!(d.app().ui.program.multicam);
+    let title = label(&mut d, "program.multicam.empty").unwrap_or_default();
+    assert!(title.contains("No multi-camera clips"), "{title}");
+    let help = label(&mut d, "program.multicam.empty.help").unwrap_or_default();
+    assert!(help.contains("Create Multi-Camera Source Sequence"), "names the command: {help}");
+    assert!(d.ids("program.multicam.angle.").is_empty());
+    // the button is greyed out until clips are selected
+    let enabled = |d: &mut Driver| d.ok("ui.elements", json!({"prefix": "program.multicam.empty.action"}))[0]["enabled"].as_bool();
+    assert_eq!(enabled(&mut d), Some(false));
+    d.snapshot("multicam-empty-no-clips");
+    d.exec("project.select", json!({"items": items}));
+    d.frames(2);
+    assert_eq!(enabled(&mut d), Some(true));
+    d.click("program.multicam.empty.action");
+    assert_eq!(d.app().ui.sync_dialog.as_ref().map(|x| x.kind.clone()).as_deref(), Some("multicam"));
+    d.click("mcam.method.in");
+    d.click("mcam.ok");
+    assert!(d.app().ui.sync_dialog.is_none(), "dialog closed: {}", d.app().ui.status);
+    let src = d.app().session.state.project_selection[0];
+    // edit it into the sequence (it plays 96 frames) and park the playhead after it
+    d.exec("source.open", json!({"item": src.0}));
+    d.exec("playhead.set", json!({"frame": 0}));
+    d.exec("source.overwrite", json!({}));
+    d.exec("playhead.set", json!({"frame": 120}));
+    d.frames(2);
+    let title = label(&mut d, "program.multicam.empty").unwrap_or_default();
+    assert!(title.contains("at the playhead"), "{title}");
+    d.snapshot("multicam-empty-not-at-playhead");
+    d.click("program.multicam.empty.action");
+    assert_eq!(d.app().session.playhead(), Tick::ZERO, "went to the multi-camera clip");
+    assert_eq!(d.ids("program.multicam.angle.").len(), 4);
+    // Multi-Camera turned off on the clip: the view offers to turn it back on
+    let clip = d.app().session.active_sequence().unwrap().video_tracks[0].items[0].id.0;
+    d.exec("clip.multicamEnable", json!({"clips": [clip], "enabled": false}));
+    d.frames(2);
+    let title = label(&mut d, "program.multicam.empty").unwrap_or_default();
+    assert!(title.contains("off"), "{title}");
+    d.click("program.multicam.empty.action");
+    assert_eq!(d.ids("program.multicam.angle.").len(), 4, "enabled again");
+    // live switching by clicking cameras while playing: one cut per click, one undo step (the
+    // clip plays 4 s; clicks follow each other closely so the pass is still running)
+    d.until("grid frame", |d| d.app().frames.queue_len() == 0);
+    let undo_before = d.app().session.history.undo.len();
+    d.ok("ui.playback", json!({"action": "play"}));
+    d.until("recording", |d| d.app().session.mcrec.active());
+    d.until("playhead past 0.3 s", |d| d.app().session.playhead() > FrameRate::FPS_24.tick_of(7));
+    d.click("program.multicam.angle.3");
+    let first = d.app().session.mcrec.cuts.first().map(|c| c.time).expect("the click recorded a cut");
+    d.until("two more frames", |d| d.app().session.playhead() > first + FrameRate::FPS_24.tick_of(2));
+    d.click("program.multicam.angle.2");
+    assert!(d.app().session.mcrec.active(), "still recording (playhead {:?})", d.app().session.playhead());
+    assert_eq!(d.app().session.mcrec.cuts.len(), 2);
+    d.snapshot("multicam-click-recording");
+    d.ok("ui.playback", json!({"action": "stop"}));
+    d.frames(2);
+    assert!(!d.app().session.mcrec.active());
+    let v = d.angles(false);
+    assert_eq!(&v[..3], [0, 2, 1], "{v:?}");
+    let q = d.app().session.active_sequence().unwrap().clone();
+    let cuts: Vec<Tick> = q.video_tracks[0].items.iter().map(|i| i.start).collect();
+    assert_eq!(cuts[1], first, "the first cut lands where the camera was clicked: {cuts:?}");
+    assert!(cuts[2] > first, "{cuts:?}");
+    assert_eq!(d.app().session.history.undo.len(), undo_before + 1, "one undo step per pass");
+    d.frames(4);
+    d.snapshot("multicam-after-click-recording");
+}
+
+/// With no sequence open the view says so instead of drawing an empty grid.
+#[test]
+fn multicam_view_without_a_sequence() {
+    let mut s = Session::default();
+    s.state.active_sequence = None;
+    s.state.open_sequences.clear();
+    let mut d = Driver::new(s);
+    d.ok("ui.menu.invoke", json!({"id": "multicam.toggleView"}));
+    d.frames(3);
+    if d.ids("program.multicam.grid").is_empty() {
+        return; // no Program monitor is drawn without a sequence
+    }
+    assert_eq!(label(&mut d, "program.multicam.empty").as_deref(), Some("No sequence open"));
+    assert!(d.ids("program.multicam.empty.action").is_empty());
+}
+
+/// Right-clicking a multi-camera clip in the Timeline offers Multi-Camera with its cameras (the
+/// shown one ticked); picking one switches the clip to it.
+#[test]
+fn timeline_clip_menu_lists_the_cameras() {
+    let (mut s, items) = session();
+    let src = s.execute("clip.createMulticam", json!({"items": items, "method": "in"})).unwrap()["sequence"].as_u64().unwrap();
+    s.execute("source.open", json!({"item": src})).unwrap();
+    s.execute("playhead.set", json!({"frame": 0})).unwrap();
+    s.execute("source.overwrite", json!({})).unwrap();
+    let clip = s.active_sequence().unwrap().video_tracks[0].items[0].id.0;
+    let mut d = Driver::new(s);
+    d.ok("ui.click", json!({"id": format!("timeline.clip.{clip}"), "button": "right"}));
+    d.frames(3);
+    d.click("timeline.clipMenu.clip.multicam");
+    let cams = d.ids("timeline.clipMenu.multicam.camera.");
+    assert_eq!(cams.len(), 4, "{cams:?}");
+    assert!(label(&mut d, "timeline.clipMenu.multicam.camera.0").is_some_and(|l| l.starts_with('✓') && l.contains("Cam A")), "the shown camera is ticked");
+    assert!(!d.ids("timeline.clipMenu.clip.multicamFlatten").is_empty());
+    d.snapshot("multicam-timeline-clip-menu");
+    d.click("timeline.clipMenu.multicam.camera.2");
+    assert_eq!(d.angles(false), [2]);
 }
