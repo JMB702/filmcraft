@@ -46,6 +46,10 @@ pub enum MediaError {
     NoStream(&'static str),
     #[error("media offline: {0}")]
     Offline(String),
+    /// The file is a cloud placeholder whose contents are not on this computer
+    /// ([`reader::NOT_DOWNLOADED`]); it was not read, so nothing was downloaded.
+    #[error("{0}: stored in iCloud, not downloaded")]
+    NotDownloaded(String),
     /// The request was cancelled (see [`cancel`]).
     #[error("cancelled")]
     Cancelled,

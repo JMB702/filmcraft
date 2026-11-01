@@ -5202,6 +5202,9 @@ fn install_project(s: &mut Session, proj: filmcraft_project::Project, path: Opti
 
 fn open_project(s: &mut Session, path: &str) -> Result<Value> {
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    if crate::interchange::is_premiere(path, &bytes) {
+        return open_premiere(s, path, &bytes);
+    }
     let loaded = filmcraft_format::decode(&bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
     install_project(s, loaded.project, Some(path.to_string()), true);
@@ -5219,6 +5222,28 @@ fn open_project(s: &mut Session, path: &str) -> Result<Value> {
     }
     let missing = crate::relink::on_open(s);
     Ok(json!({"path": path, "schemaVersion": from, "migrated": migrated, "missingMedia": missing}))
+}
+
+/// Open a Premiere Pro project: a new, unsaved project named after it that holds everything it
+/// imports, so saving never writes over the `.prproj`. The current project stays open when the
+/// file cannot be read.
+fn open_premiere(s: &mut Session, path: &str, bytes: &[u8]) -> Result<Value> {
+    let format = filmcraft_interchange::Format::Prproj;
+    let parsed = crate::interchange::parse(s, path, bytes, format)?;
+    let name = std::path::Path::new(path).file_stem().map_or_else(|| "Premiere Project".to_string(), |n| n.to_string_lossy().into_owned());
+    install_project(s, filmcraft_project::Project::new(&name), None, true);
+    let imported = crate::interchange::merge(s, path, format, parsed, None)?;
+    // the converted project is where its history starts, and it has never been saved
+    s.history = Default::default();
+    s.history.limit = 200;
+    s.saved_revision = 0;
+    if let Some(seq) = s.state.active_sequence {
+        s.events.push(crate::Event::OpenSequence(seq));
+    }
+    let missing = crate::relink::on_open(s);
+    let not_downloaded = crate::relink::not_downloaded(s).len();
+    s.toast(format!("Opened Premiere Pro project \"{name}\" as a new project; save it to keep a FilmCraft copy"));
+    Ok(json!({"path": path, "format": format.name(), "imported": imported, "missingMedia": missing, "notDownloaded": not_downloaded}))
 }
 
 /// Load a recovery candidate (newest when `id` is None) as the current, unsaved project.

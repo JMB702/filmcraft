@@ -26,6 +26,9 @@ pub enum OfflineReason {
     MadeOffline,
     /// The file is there but couldn't be read or decoded.
     Unreadable,
+    /// The file is a cloud placeholder (iCloud Drive) whose contents are not on this computer.
+    /// It is not read, so opening the project does not wait for a download.
+    NotDownloaded,
 }
 
 impl OfflineReason {
@@ -34,6 +37,7 @@ impl OfflineReason {
             OfflineReason::Missing => "MEDIA NOT FOUND",
             OfflineReason::MadeOffline => "MEDIA SET OFFLINE",
             OfflineReason::Unreadable => "MEDIA UNREADABLE",
+            OfflineReason::NotDownloaded => "MEDIA NOT DOWNLOADED",
         }
     }
 }
@@ -87,6 +91,7 @@ pub fn slate(w: usize, h: usize, file_name: &str, reason: OfflineReason) -> Imag
     }
     let hint = match reason {
         OfflineReason::MadeOffline => "Link Media… brings it back",
+        OfflineReason::NotDownloaded => "In iCloud: download it in Finder, then reopen the project",
         _ => "File > Link Media… reconnects it",
     };
     text(&mut img, hint, "Regular", Vec2::new(cx as f64, (ty0 + tri_h + s * 0.205) as f64), s * 0.028, [0.85, 0.72, 0.72, 1.0], pw * 0.94);

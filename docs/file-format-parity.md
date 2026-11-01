@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-30 · **Change:** minor (AVI import #650 and VP8 WebM #1064 ship; GIF export binary transparency retained) · **Target:** Adobe Premiere Pro 2026 (26.5.2) and Media Encoder 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-01 · **Change:** major (`.prproj` import ships) · **Target:** Adobe Premiere Pro 2026 (26.5.2) and Media Encoder 2026
 
 Containers, stills, audio files, project and interchange files, captions and presets. Codecs inside
 the containers are in [codec-parity.md](codec-parity.md). Our import list is
@@ -13,7 +13,7 @@ only). "Tested" names the evidence.
 
 | Format | Premiere | Read | Write | Tested | % |
 |---|---|---|---|---|---|
-| **Premiere project `.prproj`** | native | **no** | **no** | — | **0%** ([G2](gaps.md#g2-premieres-prproj-cannot-be-opened)) |
+| **Premiere project `.prproj`** | native | yes: bins, media, sequences, clips, transitions, markers, multi-camera, Motion / Opacity / Transform / Volume; other effects, graphic text and mixer settings reported, not imported | **no** | synthetic fixtures and hostile-input tests; one real Premiere 2026 project (env-gated, never committed) | **55%** ([G2](gaps.md#g2-premieres-prproj-cannot-be-opened)) |
 | Our project `.fcproj` | — | yes, schema migrations | yes, atomic, auto-save, recovery journal | migration tests | — |
 | FCP7 XML (`xmeml`) | read + write | yes | yes | round-trip tests; Premiere-exported XML slow (#461) | 75% |
 | FCPXML | read (via XtoCC) | yes | yes | round-trip tests | 80% |
@@ -84,14 +84,16 @@ only). "Tested" names the evidence.
 
 ## Summary
 
-**File formats dimension: ~60%, 140–240 h** (codecs counted separately). The beta blocker is
-`.prproj`. After it, by user impact: WMV import, AVI export and DivX / Xvid / DV, EXR / PSD stills, AAF / OMF
+**File formats dimension: ~60%, 140–240 h** (codecs counted separately; not re-measured since
+`.prproj` import shipped). `.prproj` now opens with its structure, timing and basic clip effects;
+what it leaves behind is G2. After it, by user impact: WMV import, AVI export and DivX / Xvid / DV, EXR / PSD stills, AAF / OMF
 validation in Avid and Pro Tools, DVD / Blu-ray / DCP / broadcast MXF delivery.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | major | `.prproj` import: Read changed from no to yes (structure, timing, multi-camera, Motion / Opacity / Transform / Volume), 0% → 55% (estimate: about half of what Premiere stores in a typical edit carries over); summary no longer calls it the beta blocker; dimension figure not re-measured |
 | 2026-10-13 | minor | Stills: EXIF Orientation applied to JPEG, PNG, WebP and TIFF (#1583); YCbCr TIFF and DNG not yet |
 | 2026-10-12 | minor | VP8 WebM decodes (#1064, closes #432): Matroska row no longer lists the black-picture report. AVI import ships (#650, merged 2026-10-12): row changed from "no demuxer" to read via `crates/avi`; summary no longer lists AVI import as missing; the row's percentage and the dimension figure (~60%, 140-240 h) were not re-measured |
 | 2026-10-10 | major | Created: format-by-format comparison with Premiere 26.5.2 from the import / export registries, crate READMEs, the installed bundle's exporter listings and open issues |

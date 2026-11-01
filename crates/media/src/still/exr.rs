@@ -10,7 +10,8 @@
 //! it the data window does not cover are transparent. Tiled, deep and multi-part files, chroma
 //! subsampled channels and the PIZ, B44 and DWA compressions are refused with a clear error.
 
-mod inflate;
+/// zlib / DEFLATE decompression, also used for gzip-wrapped project files (Premiere `.prproj`).
+pub mod inflate;
 
 use std::sync::Arc;
 

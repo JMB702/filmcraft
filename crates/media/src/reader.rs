@@ -44,6 +44,56 @@ impl ByteReader for MemReader {
     }
 }
 
+/// `SF_DATALESS` in a file's `st_flags` (macOS): its contents are in the cloud (an iCloud Drive
+/// file evicted by "Optimise Mac Storage"). Reading one makes the system download it first, and
+/// the read blocks until it has, for minutes on a large camera file.
+pub const SF_DATALESS: u32 = 0x4000_0000;
+
+/// Why a cloud placeholder does not open: the reason the media pool shows.
+pub const NOT_DOWNLOADED: &str = "stored in iCloud, not downloaded";
+
+/// The error [`FileReader::open`] returns for a cloud placeholder ([`not_downloaded`]).
+#[derive(Debug)]
+pub struct NotDownloaded;
+
+impl std::fmt::Display for NotDownloaded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(NOT_DOWNLOADED)
+    }
+}
+
+impl std::error::Error for NotDownloaded {}
+
+/// The I/O error for a file whose contents are not on this computer (see [`is_not_downloaded`]).
+pub fn not_downloaded() -> io::Error {
+    io::Error::other(NotDownloaded)
+}
+
+/// Whether `e` says the file is a cloud placeholder ([`not_downloaded`]).
+pub fn is_not_downloaded(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<NotDownloaded>())
+}
+
+/// Whether `st_flags` mark a cloud placeholder ([`SF_DATALESS`]).
+pub fn is_dataless(st_flags: u32) -> bool {
+    st_flags & SF_DATALESS != 0
+}
+
+/// Whether `path` is a cloud placeholder, judged from its metadata alone: nothing is read and
+/// nothing is downloaded. Always false off macOS and for a path that cannot be looked up.
+pub fn is_cloud_placeholder(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        std::fs::metadata(path).is_ok_and(|m| is_dataless(m.st_flags()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// Files [`FileReader`]s keep open at most, together (#67). Each open media source used to hold
 /// its own descriptor, so a project with hundreds of sources hit the soft descriptor limit (256 on
 /// macOS, 1024 on Linux) and the rest showed as failed or offline. Past this many, the least
@@ -138,7 +188,12 @@ impl FileReader {
         Self::open_in(path, &FILE_POOL)
     }
 
+    /// Open `path` for reading in place. A cloud placeholder is refused with [`not_downloaded`]
+    /// before it is opened: reading it would wait for the download.
     pub(crate) fn open_in(path: &std::path::Path, pool: &Arc<FilePool>) -> io::Result<Self> {
+        if is_cloud_placeholder(path) {
+            return Err(not_downloaded());
+        }
         let file = std::fs::File::open(path)?;
         let m = file.metadata()?;
         if !m.is_file() {
@@ -155,6 +210,10 @@ impl FileReader {
     fn file(&self) -> io::Result<Arc<std::fs::File>> {
         if let Some(file) = self.pool.get(self.id) {
             return Ok(file);
+        }
+        // evicted to the cloud since it was opened: fail the read instead of waiting for it
+        if is_cloud_placeholder(&self.path) {
+            return Err(not_downloaded());
         }
         let file = std::fs::File::open(&self.path)?;
         let m = file.metadata()?;
@@ -257,6 +316,22 @@ mod tests {
         assert_eq!(&b, b"456");
         assert_eq!(r.read_at(8, &mut b).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
         assert_eq!(read_range(&r, 8, 100).unwrap(), b"89");
+    }
+
+    #[test]
+    fn cloud_placeholders_are_told_by_their_flags_and_error() {
+        assert!(is_dataless(SF_DATALESS));
+        assert!(is_dataless(SF_DATALESS | 0x20));
+        assert!(!is_dataless(0) && !is_dataless(0x20));
+        assert!(is_not_downloaded(&not_downloaded()));
+        assert_eq!(not_downloaded().to_string(), NOT_DOWNLOADED);
+        assert!(!is_not_downloaded(&io::Error::other("busy")) && !is_not_downloaded(&io::ErrorKind::NotFound.into()));
+        // an ordinary file, and a path that is not there, are not placeholders
+        let path = std::env::temp_dir().join(format!("filmcraft-dataless-{}", std::process::id()));
+        std::fs::write(&path, b"local").unwrap();
+        assert!(!is_cloud_placeholder(&path));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!is_cloud_placeholder(&path));
     }
 
     #[cfg(any(unix, windows))]

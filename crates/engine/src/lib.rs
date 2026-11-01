@@ -213,8 +213,13 @@ impl Services for FsServices {
     fn home_dir(&self) -> Option<String> {
         media_browser::std_home_dir()
     }
+    /// A cloud placeholder is refused, as [`filmcraft_media::reader::FileReader::open`] does:
+    /// reading it would wait for its download.
     fn read_range(&self, path: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
+        if filmcraft_media::reader::is_cloud_placeholder(std::path::Path::new(path)) {
+            return Err(filmcraft_media::reader::not_downloaded());
+        }
         let mut f = std::fs::File::open(path)?;
         f.seek(SeekFrom::Start(offset))?;
         let mut out = Vec::with_capacity(len);
@@ -1401,6 +1406,8 @@ mod project_manager_tests;
 mod project_panel_tests;
 #[cfg(test)]
 mod proxies_tests;
+#[cfg(test)]
+mod prproj_tests;
 #[cfg(test)]
 mod relink_tests;
 #[cfg(test)]

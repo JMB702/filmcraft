@@ -39,7 +39,8 @@ pub struct OfflineStatus {
 }
 
 /// An offline item an export or a rendered frame drew the slate for (#1054). `status` is the
-/// word `media.status` uses: `missing`, `offline` (made offline) or `unreadable`.
+/// word `media.status` uses: `missing`, `offline` (made offline), `unreadable` or
+/// `notDownloaded` (a cloud placeholder).
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct OfflineMedia {
     pub item: u64,
@@ -76,6 +77,37 @@ impl Default for MediaPool {
             openers: RwLock::new(filmcraft_codecs::openers()),
             stored: RwLock::default(),
         }
+    }
+}
+
+/// The media error for a failed file read: a missing file is offline, a cloud placeholder is not
+/// downloaded (its name kept for the message), anything else is an I/O error.
+fn io_error(path: &str, e: std::io::Error) -> MediaError {
+    if filmcraft_media::reader::is_not_downloaded(&e) {
+        MediaError::NotDownloaded(file_name(path))
+    } else if e.kind() == std::io::ErrorKind::NotFound {
+        MediaError::Offline(e.to_string())
+    } else {
+        MediaError::Io(e.to_string())
+    }
+}
+
+/// Why media that failed to open with `e` renders offline.
+pub fn offline_reason(e: &MediaError) -> OfflineReason {
+    match e {
+        MediaError::Offline(_) => OfflineReason::Missing,
+        MediaError::NotDownloaded(_) => OfflineReason::NotDownloaded,
+        _ => OfflineReason::Unreadable,
+    }
+}
+
+/// The word `media.status` and export reports use for an offline reason.
+pub fn offline_status_word(reason: OfflineReason) -> &'static str {
+    match reason {
+        OfflineReason::Missing => "missing",
+        OfflineReason::MadeOffline => "offline",
+        OfflineReason::Unreadable => "unreadable",
+        OfflineReason::NotDownloaded => "notDownloaded",
     }
 }
 
@@ -282,7 +314,7 @@ impl MediaPool {
     /// Read and open a file through `services` (through its random-access reader when the host
     /// has one: containers then read only their index now and samples on demand).
     pub fn open_file(&self, path: &str, services: &dyn Services) -> Result<SharedSource, MediaError> {
-        let io = |e: std::io::Error| if e.kind() == std::io::ErrorKind::NotFound { MediaError::Offline(e.to_string()) } else { MediaError::Io(e.to_string()) };
+        let io = |e: std::io::Error| io_error(path, e);
         if let Some(r) = services.reader(path) {
             let openers = self.openers.read().unwrap_or_else(PoisonError::into_inner).clone();
             return filmcraft_media::reader::open_reader(&file_name(path), r.map_err(io)?, &filmcraft_codecs::reader_openers(), &openers);
@@ -296,7 +328,7 @@ impl MediaPool {
     /// (#157). Hosts without random-access readers open the file as [`Self::open_file`] does.
     pub fn probe_file(&self, path: &str, services: &dyn Services) -> Result<SharedSource, MediaError> {
         let Some(r) = services.reader(path) else { return self.open_file(path, services) };
-        let r = r.map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { MediaError::Offline(e.to_string()) } else { MediaError::Io(e.to_string()) })?;
+        let r = r.map_err(|e| io_error(path, e))?;
         let openers = self.openers.read().unwrap_or_else(PoisonError::into_inner).clone();
         filmcraft_media::reader::open_reader_within(&file_name(path), r, &filmcraft_codecs::reader_openers(), &openers, PROBE_WHOLE_FILE_MAX)
     }
@@ -354,7 +386,7 @@ impl MediaPool {
                 }
                 Err(e) => {
                     log::warn!("media offline: {path}: {e}");
-                    let reason = if matches!(e, MediaError::Offline(_)) { OfflineReason::Missing } else { OfflineReason::Unreadable };
+                    let reason = offline_reason(&e);
                     self.set_offline(item, reason, path, &e.to_string());
                     Arc::new(SlateSource::new(m.info.clone(), &file_name(path), reason))
                 }
@@ -383,7 +415,8 @@ impl MediaPool {
         Some(self.unsupported_as_slate(item, path, src))
     }
 
-    fn set_offline(&self, item: ItemId, reason: OfflineReason, path: &str, error: &str) {
+    /// Record why `item` renders offline (shown by the UI and `media.status`).
+    pub(crate) fn set_offline(&self, item: ItemId, reason: OfflineReason, path: &str, error: &str) {
         self.offline.write().unwrap_or_else(PoisonError::into_inner).insert(item, OfflineStatus { reason, path: path.to_string(), error: error.to_string() });
     }
 
@@ -470,11 +503,7 @@ impl PoolProvider {
             .into_iter()
             .filter_map(|id| {
                 let st = self.pool.offline_status(id)?;
-                let status = match st.reason {
-                    OfflineReason::Missing => "missing",
-                    OfflineReason::MadeOffline => "offline",
-                    OfflineReason::Unreadable => "unreadable",
-                };
+                let status = offline_status_word(st.reason);
                 let name = self.project.item(id).map(|i| i.name.clone()).unwrap_or_default();
                 Some(OfflineMedia { item: id.0, name, path: st.path, status, error: st.error })
             })

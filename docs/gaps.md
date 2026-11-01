@@ -1,6 +1,6 @@
 # Where FilmCraft falls short of Premiere Pro
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-30 · **Change:** minor (G14 catalog counts refreshed; G13 GIF binary transparency retained) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-01 · **Change:** major (G2: `.prproj` import ships; the entry now lists what it does not carry over) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Every known shortfall, one entry each, ranked by what most stops an editor using FilmCraft for real
 work. This is the work list: agents should prefer it over adding checklist items. Numbers are in
@@ -15,7 +15,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | # | Gap | Kind | Blocks beta | Estimate |
 |---|---|---|---|---|
 | G1 | Nothing compares our output with Premiere's | measurement | no, but every ready number depends on it | 40–70 h |
-| G2 | Premiere's `.prproj` cannot be opened | file format | **yes** | 60–120 h |
+| G2 | `.prproj` opens, but most effects, graphic text and mixer settings stay behind | file format | partly | 30–60 h |
 | G3 | 10-bit and 4:2:2 camera media needs hardware | codec | yes | 30–50 h |
 | G4 | Crashes at start-up, and no test CI on pull requests | stability | yes | 40–80 h |
 | G5 | Hardware acceleration is partial | hardware | partly | 120–200 h |
@@ -50,18 +50,42 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   from one command; Premiere output stays local in `plan/premiere/` (gitignored). Owner runs
   Premiere (installed). **40–70 h.** Doc: [target-app-parity.md](target-app-parity.md).
 
-## G2. Premiere's `.prproj` cannot be opened
+<a id="g2-premieres-prproj-cannot-be-opened"></a>
 
-- **Missing:** import of Premiere project files. `grep -ri prproj crates apps` finds nothing.
-  Today an editor must export FCP7 XML, AAF or OTIO from Premiere first, losing bins, effects and
-  most metadata; there is no "Selection as Premiere Project" export either.
-- **Impact:** the beta bar requires opening the target's main format; every switching editor's
-  existing work is behind this.
-- **Approach:** `.prproj` is gzip-compressed XML. Clean-room from projects we author ourselves in
-  Premiere (the owner has `plan/premiere/fixtures/filmcraft_ref.prproj`): sequences, tracks, clips,
-  in/out, speed, transitions, markers, bins, labels, then the common effect parameters (Motion,
-  Opacity, Lumetri basic, Volume). Report what was not imported. Export later. **60–120 h.**
-  Doc: [file-format-parity.md](file-format-parity.md).
+## G2. `.prproj` opens, but most effects, graphic text and mixer settings stay behind
+
+- **Done:** File ▸ Open converts a Premiere project into a new, unsaved FilmCraft project; File ▸
+  Import and `filmcraft-cli import` merge one into the open project
+  (`crates/interchange/src/prproj`). Carried over: the bin tree and labels; media items with the
+  stored path, falling back to the project-relative path when only it exists; sequences (frame
+  size and rate, sample rate, start timecode, In / Out, work area, markers); tracks; clips
+  (position, duration, source In, speed and reverse, frame hold, enabled state, clip gain, audio
+  channels, links); audio and video transitions; nested sequences; multi-camera source sequences
+  and each multi-camera clip's angle; Generative Extend results; and the clip effects Motion
+  (with its crop), Opacity, Transform and Volume, keyframes included. Everything else is listed in
+  the import report.
+- **Evidence:** synthetic fixtures and hostile-input tests (truncation, byte flips, dangling
+  references, cycles, absurd numbers) in `crates/interchange/tests/it/prproj.rs`; engine tests of
+  Open and Import with the relative-path fallback. One real Premiere 2026 multi-camera project
+  (hundreds of megabytes of XML, about 3 s to import; read from `FILMCRAFT_PRPROJ_SAMPLE`, never
+  committed) matched an independent reading of its XML for the bin tree, every sequence's
+  per-track clip counts, the multi-camera cameras, and spot-checked clip positions, source Ins and
+  angles. Not compared with Premiere's own rendering.
+- **Missing:** effects other than Motion, Opacity, Transform and Volume (Lumetri, Warp
+  Stabilizer, audio effects such as Dynamics and Reverb, which Premiere names only by an internal
+  id); opacity blend modes (Premiere's mode numbering is unmapped); graphic text and shapes
+  (graphics import as empty graphic items); track mute / solo / lock and mixer settings;
+  Essential Sound; captions and transcripts; time remapping; "Custom Fade" audio transitions
+  become Constant Power. Keyframe interpolation codes other than linear (0) and Bezier (5) are
+  guesses. Which audio tracks belong to which camera of a multi-camera source is inferred from
+  shared source clips; tracks matching no camera stay silent in the multi-camera clip. No
+  `.prproj` export ("Selection as Premiere Project").
+- **Impact:** an editor's Premiere work opens with its structure and timing intact, but colour,
+  graphics text and audio processing must be redone.
+- **Done when:** Lumetri basic correction, blend modes, graphic text, track states and the common
+  audio effects import; a project authored in Premiere for the purpose (the owner has
+  `plan/premiere/fixtures/filmcraft_ref.prproj`) renders within tolerance against Premiere's
+  output (with G1). Export later. **30–60 h.** Doc: [file-format-parity.md](file-format-parity.md).
 
 ## G3. 10-bit and 4:2:2 camera media needs hardware
 
@@ -344,6 +368,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | major | G2: `.prproj` import ships (File ▸ Open, File ▸ Import, CLI import): structure, timing, multi-camera, Motion / Opacity / Transform / Volume; the entry now lists what is not carried over; no longer blocks beta outright, estimate 30–60 h |
 | 2026-10-30 | minor | G14: three key languages have no catalog (Hindi, Arabic, Vietnamese); Korean, Italian, German and Russian are near-complete; Ukrainian is menus only; G13 GIF transparency retained |
 | 2026-10-12 | minor | Removed shipped items: AVI import (#598), FLAC in MP4 (#603), multicam paging, deselect on empty space (#683), Project marquee (#578), image-sequence downloads in Chrome (#378), slow interchange import (#461) |
 | 2026-10-10 | major | Created from ROADMAP.md's "Where we are lacking" (2026-10-05); re-ranked against Premiere 26.5.2 and the 188 open issues; added `.prproj`, 10-bit / 4:2:2 camera decode, launch crashes and missing PR CI, localization, delivery formats |

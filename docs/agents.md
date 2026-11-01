@@ -254,7 +254,7 @@ stderr (`item 8 a.mp4 (missing): /path/a.mp4`) and exit 1 after writing the outp
 unmounted media folder doesn't pass as a good render. `--allow-offline` accepts the placeholder
 frames: the warning stays and the exit status is 0. The export result lists the same items as
 `offlineMedia` (`[{item, name, path, status, error}]`, `status` as in `media.status`: `missing`,
-`offline` or `unreadable`), and `[]` when every clip it drew was online; check before exporting with
+`offline`, `unreadable` or `notDownloaded`), and `[]` when every clip it drew was online; check before exporting with
 `exec media.status` or `exec media.findMissing`.
 
 `markers.exportCsv {path}` exports all markers in the active sequence, including colours hidden

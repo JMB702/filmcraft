@@ -292,13 +292,25 @@ have no identity, so relinking them skips the fingerprint check.
   `craft-docpath`); a relative path is taken from the document's folder. Other paths (another
   computer, a device) count as missing: the item shows the offline slate, the open says why, and
   the Link Media dialog lists it. A file imported or linked in this session is opened as given.
+- **Files stored in iCloud** (macOS: an iCloud Drive file evicted by "Optimise Mac Storage", the
+  `SF_DATALESS` flag) are not read: reading one makes the system download it first, and the read
+  waits until it has. Every native media read checks the flag from the file's metadata
+  (`filmcraft_media::reader::FileReader`, `FsServices::read_range`), so nothing is downloaded and
+  nothing waits. The item shows the slate with "MEDIA NOT DOWNLOADED", `media.status` says
+  `notDownloaded`, the open says how many there are, and an import lists each one in its report
+  ("a.mov: stored in iCloud, not downloaded"). They are not missing, so Link Media does not list
+  them: download them in Finder, then reopen the project.
+- **Importing a document** (an interchange file, a Premiere project) opens its media files to read
+  their properties, for at most 5 s together (`LINK_MEDIA_BUDGET`): a file on a share that stopped
+  answering can't hold the app. Files not opened by then are listed as `deferredMedia` and open when
+  they are played, as a saved project's files do.
 
 ### Link Media
 
 | Command | |
 |---|---|
 | `media.findMissing` | `{missing: [{item, name, fileName, path, status: missing\|offline\|proxyMissing, duration, startTimecode}]}` |
-| `media.status {item?}` | per item: `online`, `missing`, `offline`, `unreadable` or `generated`, plus identity and proxy |
+| `media.status {item?}` | per item: `online`, `missing`, `offline`, `unreadable`, `notDownloaded` (stored in iCloud) or `generated`, plus identity and proxy |
 | `media.linkMedia` | File ▸ Link Media… (rescans; the UI opens the dialog) |
 | `media.relink {item, path, force?, relinkOthers?=true, alignTimecode?, match?}` | check, link, then the others |
 | `media.autoRelink {from, to}` / `{folder}` | batch relink: a folder-prefix remap, or a search of a folder tree |
