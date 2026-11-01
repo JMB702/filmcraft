@@ -210,6 +210,39 @@ impl Doc {
         self.obj("Link", &format!("<TrackItemGroup Version=\"1\"><TrackItems Version=\"1\">{}</TrackItems></TrackItemGroup>", list("TrackItem", &items)))
     }
 
+    fn param(&mut self, point: bool, id: u32, name: &str, start: &str, keyframes: &str) -> u64 {
+        let class = if point { "PointComponentParam" } else { "VideoComponentParam" };
+        let k = if keyframes.is_empty() { String::new() } else { format!("<IsTimeVarying>true</IsTimeVarying><Keyframes>{keyframes}</Keyframes>") };
+        self.obj(class, &format!("<ParameterID>{id}</ParameterID><Name>{name}</Name><StartKeyframe>-91445760000000000,{start},0,0,0,0,0,0</StartKeyframe>{k}"))
+    }
+
+    fn filter(&mut self, match_name: &str, display: &str, params: &[u64]) -> u64 {
+        let params: Vec<String> = params.iter().map(|p| r(*p)).collect();
+        self.obj(
+            "VideoFilterComponent",
+            &format!(
+                "<Component Version=\"7\"><Params Version=\"1\">{}</Params><DisplayName>{display}</DisplayName></Component><MatchName>{match_name}</MatchName>",
+                list("Param", &params)
+            ),
+        )
+    }
+
+    fn volume(&mut self, level: &str, keyframes: &str) -> u64 {
+        let k = if keyframes.is_empty() { String::new() } else { format!("<IsTimeVarying>true</IsTimeVarying><Keyframes>{keyframes}</Keyframes>") };
+        let mute = self.obj("AudioComponentParam", "<Name>Mute</Name>");
+        let lvl = self.obj("AudioComponentParam", &format!("<StartKeyframe>-91445760000000000,{level},0,0,0,0,0,0</StartKeyframe>{k}<Name>Level</Name>"));
+        self.obj(
+            "AudioFilterComponent",
+            &format!("<AudioComponent Version=\"3\"><Component Version=\"7\"><Params Version=\"1\">{}</Params></Component></AudioComponent><FilterMatchName>Internal Volume Stereo</FilterMatchName>", list("Param", &[r(mute), r(lvl)])),
+        )
+    }
+
+    fn chain(&mut self, video: bool, filters: &[u64]) -> u64 {
+        let filters: Vec<String> = filters.iter().map(|f| r(*f)).collect();
+        let class = if video { "VideoComponentChain" } else { "AudioComponentChain" };
+        self.obj(class, &format!("<ComponentChain Version=\"3\"><Components Version=\"1\">{}</Components></ComponentChain>", list("Component", &filters)))
+    }
+
     fn markers(&mut self, json: &[String]) -> u64 {
         let ids: Vec<String> = json
             .iter()
@@ -270,6 +303,19 @@ fn project() -> Doc {
         "",
         &format!("<TailTransition {}/>", r(dissolve)),
     );
+    // camera A's clip: Motion scale animated 100 → 150 over source 1 s → 3 s (clip 0 → 1 s at
+    // 200 %), position a quarter in from the left, Opacity 75 %, a Transform and an unsupported effect
+    let position = d.param(true, 1, "Position", "0.25:0.5", "");
+    let scale = d.param(false, 2, "Scale", "100.", &format!("{SEC},100.,0,0,0,0,0,0;{},150.,5,0,0,0.333,0,0.333;", 3 * SEC));
+    let rotation = d.param(false, 5, "Rotation", "10.", "");
+    let motion = d.filter("AE.ADBE Motion", "Motion", &[position, scale, rotation]);
+    let opacity_p = d.param(false, 1, "Opacity", "75.", "");
+    let opacity = d.filter("AE.ADBE Opacity", "Opacity", &[opacity_p]);
+    let tscale = d.param(false, 3, "Scale Height", "120.", "");
+    let tpos = d.param(true, 2, "Position", "0.5:0.75", "");
+    let transform = d.filter("AE.ADBE Geometry2", "Transform", &[tpos, tscale]);
+    let glow = d.filter("AE.ADBE Glo2", "Glow", &[]);
+    let vchain = d.chain(true, &[motion, opacity, transform, glow]);
     let cav = d.media_source(true, "cam-a-media", 60 * SEC);
     let e2 = d.track_item(
         true,
@@ -279,7 +325,7 @@ fn project() -> Doc {
         cav,
         &format!("<InPoint>{SEC}</InPoint><PlaybackSpeed>2.</PlaybackSpeed>"),
         "",
-        &format!("<IsMuted>true</IsMuted><HeadTransition {}/>", r(dissolve)),
+        &format!("<IsMuted>true</IsMuted><HeadTransition {}/><ComponentOwner Version=\"1\"><Components {}/></ComponentOwner>", r(dissolve), r(vchain)),
     );
     let gsrc2 = d.media_source(true, "graphic-media", 3600 * SEC);
     let e3 = d.track_item(true, SEC, 3 * SEC, "graphic-master", gsrc2, "", "", "");
@@ -294,6 +340,9 @@ fn project() -> Doc {
         "",
         "",
     );
+    // the recorder's volume: −6 dB, then a keyframed dip to −12 dB
+    let vol = d.volume("0.0891250938", &format!("0,0.0891250938,0,0;{},0.0446683592,0,0;", 2 * SEC));
+    let achain = d.chain(false, &[vol]);
     let right = d.obj("SecondaryContent", "<ChannelIndex>1</ChannelIndex>");
     let lsrc = d.media_source(false, "lav-media", 60 * SEC);
     let e5 = d.track_item(
@@ -307,7 +356,7 @@ fn project() -> Doc {
             "<Gain>2.</Gain><SecondaryContents Version=\"1\"><SecondaryContentItem Index=\"0\"><Second {}/></SecondaryContentItem></SecondaryContents>",
             r(right)
         ),
-        &format!("<TailTransition {}/>", r(fade)),
+        &format!("<TailTransition {}/><ComponentOwner Version=\"1\"><Components {}/></ComponentOwner>", r(fade), r(achain)),
     );
     let ev1 = d.track(true, &[e1, e2], &[dissolve]);
     let ev2 = d.track(true, &[e3], &[]);
@@ -473,6 +522,39 @@ fn clips_timing_speed_links_and_transitions() {
     let fade = &edit.audio_tracks[1].transitions;
     assert_eq!(fade.len(), 1);
     assert_eq!((fade[0].from, fade[0].to, fade[0].align), (Some(a2[0].id), None, filmcraft_project::TransitionAlign::EndAtCut));
+}
+
+fn float(ti: &TrackItem, effect: &str, param: &str) -> Option<f64> {
+    ti.effect(effect).and_then(|e| e.param(param)).and_then(|p| p.value.as_f64())
+}
+
+#[test]
+fn motion_opacity_transform_and_volume() {
+    let (imported, _, report) = import(&project().xml());
+    let (_, edit) = find(&imported.project, "Edit");
+    let cam = clips(edit, true, 0)[1];
+    // keyframes move from source time to clip time: (source − In 1 s) / 200 %
+    let scale = cam.effect("motion").and_then(|e| e.param("scale")).unwrap();
+    let keys: Vec<(Tick, f64)> = scale.keyframes.iter().map(|k| (k.time, k.value.as_f64().unwrap())).collect();
+    assert_eq!(keys, [(Tick(0), 100.0), (Tick(SEC), 150.0)]);
+    assert_eq!(scale.keyframes[1].interp, filmcraft_project::Interpolation::Bezier);
+    // Position is a fraction of the 1920×1080 sequence frame
+    let pos = cam.effect("motion").and_then(|e| e.param("position")).and_then(|p| p.value.as_vec2()).unwrap();
+    assert_eq!((pos.x, pos.y), (480.0, 540.0));
+    assert_eq!(float(cam, "motion", "rotation"), Some(10.0));
+    assert_eq!(float(cam, "opacity", "opacity"), Some(75.0));
+    // Transform works in the clip's own picture
+    assert_eq!(float(cam, "transform", "scale_height"), Some(120.0));
+    let tpos = cam.effect("transform").and_then(|e| e.param("position")).and_then(|p| p.value.as_vec2()).unwrap();
+    assert_eq!((tpos.x, tpos.y), (960.0, 810.0));
+    assert!(report.to_string().contains("effect \"Glow\" is not supported"), "{report}");
+    // the multi-camera clip kept default Motion
+    assert_eq!(float(clips(edit, true, 0)[0], "motion", "scale"), Some(100.0));
+    // Volume: Premiere's level is linear with 0 dB at 10^(−15/20)
+    let lav = clips(edit, false, 1)[0];
+    let level = lav.effect("volume").and_then(|e| e.param("level")).unwrap();
+    let keys: Vec<(Tick, f64)> = level.keyframes.iter().map(|k| (k.time, (k.value.as_f64().unwrap() * 100.0).round() / 100.0)).collect();
+    assert_eq!(keys, [(Tick(0), -6.0), (Tick(2 * SEC), -12.0)]);
 }
 
 #[test]
@@ -713,5 +795,26 @@ fn real_project_from_env() {
         println!("import took {elapsed:?}; {} items, {sequences} sequences, {} relink candidates", p.items.len(), relinks.len());
         print!("{}", tree(p));
         print!("{report}");
+        // effect counts over every clip
+        let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+        for seq in p.items.values().filter_map(|i| i.as_sequence()) {
+            for ti in seq.all_tracks().flat_map(|t| &t.items) {
+                for e in &ti.effects {
+                    let changed = e.params.iter().any(|(id, v)| {
+                        v.is_animated()
+                            || filmcraft_project::find_effect(&e.effect)
+                                .and_then(|d| d.param(id))
+                                .is_some_and(|d| d.default != v.value && !matches!(d.default, filmcraft_project::ParamValue::Vec2(_)))
+                    }) || e.params.iter().any(|(_, v)| v.value.as_vec2().is_some_and(|p| !p.x.is_nan()));
+                    if changed {
+                        *counts.entry(e.effect.as_str()).or_default() += 1;
+                    }
+                    if e.params.values().any(|v| v.is_animated()) {
+                        *counts.entry("(animated)").or_default() += 1;
+                    }
+                }
+            }
+        }
+        println!("clips with changed effects: {counts:?}");
     }
 }

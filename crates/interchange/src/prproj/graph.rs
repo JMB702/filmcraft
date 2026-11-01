@@ -128,6 +128,31 @@ pub(super) struct TrackItem {
     pub disabled: bool,
     pub head: Option<Ref>,
     pub tail: Option<Ref>,
+    /// The clip's effect chain.
+    pub components: Option<Ref>,
+}
+
+/// An effect instance on a clip (`VideoFilterComponent` / `AudioFilterComponent`).
+#[derive(Debug, Default)]
+pub(super) struct Filter {
+    /// `AE.ADBE Motion`, `AE.ADBE Opacity`, `Internal Volume Mono`, …
+    pub match_name: String,
+    /// The name Premiere shows.
+    pub name: String,
+    pub params: Vec<Ref>,
+    pub bypass: bool,
+}
+
+/// One effect parameter as Premiere writes it: the value at the start (`StartKeyframe`, a
+/// `time,value,…` record) and, when animated, the keyframes (`time,value,…;` records, times in
+/// the source media's ticks).
+#[derive(Debug, Default)]
+pub(super) struct Param {
+    /// The parameter's number within its effect (`ParameterID`).
+    pub id: Option<i64>,
+    pub name: String,
+    pub start: Option<String>,
+    pub keyframes: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -169,6 +194,10 @@ pub(super) enum Rec {
     Markers(Vec<Ref>),
     /// The marker's `DVAMarker` JSON.
     Marker(String),
+    /// A clip's effects, in order.
+    Chain(Vec<Ref>),
+    Filter(Filter),
+    Param(Param),
 }
 
 /// The parsed object graph.
@@ -200,6 +229,13 @@ impl Graph {
 
 /// Classes the importer reads. Everything else is counted and skipped without parsing.
 const READ: &[&str] = &[
+    "VideoComponentChain",
+    "AudioComponentChain",
+    "VideoFilterComponent",
+    "AudioFilterComponent",
+    "VideoComponentParam",
+    "PointComponentParam",
+    "AudioComponentParam",
     "RootProjectItem",
     "BinProjectItem",
     "ClipProjectItem",
@@ -466,6 +502,7 @@ fn record(class: &str, n: Node<'_, '_>) -> Option<Rec> {
                 disabled: at_bool(c, &["IsMuted"]),
                 head: ref_at(c, &["HeadTransition"]),
                 tail: ref_at(c, &["TailTransition"]),
+                components: ref_at(c, &["ComponentOwner", "Components"]),
             })
         }
         "VideoTransitionTrackItem" | "AudioTransitionTrackItem" => {
@@ -481,6 +518,25 @@ fn record(class: &str, n: Node<'_, '_>) -> Option<Rec> {
         "Link" => Rec::Link(refs_at(n, &["TrackItemGroup", "TrackItems"], "TrackItem")),
         "Markers" => Rec::Markers(refs_at(n, &["Markers"], "Marker")),
         "Marker" => Rec::Marker(child_text(n, "DVAMarker").unwrap_or("").to_string()),
+        "VideoComponentChain" | "AudioComponentChain" => Rec::Chain(refs_at(n, &["ComponentChain", "Components"], "Component")),
+        "VideoFilterComponent" | "AudioFilterComponent" => {
+            let video = class == "VideoFilterComponent";
+            let component = if video { at(n, &["Component"]) } else { at(n, &["AudioComponent", "Component"]) };
+            let match_name = child_text(n, if video { "MatchName" } else { "FilterMatchName" }).unwrap_or("").trim().to_string();
+            let name = child_text(n, "InstanceName").or_else(|| component.and_then(|c| child_text(c, "DisplayName"))).unwrap_or(&match_name).trim().to_string();
+            Rec::Filter(Filter {
+                match_name,
+                name,
+                params: component.map(|c| refs_at(c, &["Params"], "Param")).unwrap_or_default(),
+                bypass: n.descendants().any(|d| d.has_tag_name("Bypass") && d.text().is_some_and(|t| t.trim().eq_ignore_ascii_case("true"))),
+            })
+        }
+        "VideoComponentParam" | "PointComponentParam" | "AudioComponentParam" => Rec::Param(Param {
+            id: at_i64(n, &["ParameterID"]),
+            name: child_text(n, "Name").unwrap_or("").trim().to_string(),
+            start: child_text(n, "StartKeyframe").map(str::to_string),
+            keyframes: child_text(n, "Keyframes").filter(|k| !k.trim().is_empty()).map(str::to_string),
+        }),
         _ => return None,
     })
 }

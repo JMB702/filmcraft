@@ -24,6 +24,7 @@ use filmcraft_project::{
 };
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 
+use super::effects::Space;
 use super::graph::{self, Graph, Rec, Ref, Source};
 use crate::common::{
     Builder, MAX_IMPORTED_TRACKS, MediaSpec, empty_sequence, gain_to_db, kind_from_ext, plausible_rate, resolve_path, settings_for, transition_effect,
@@ -486,6 +487,13 @@ impl Map<'_, '_> {
         if let Some(gain) = clip.gain.filter(|g| *g > 0.0 && (*g - 1.0).abs() > 1e-6) {
             c.gain_db = gain_to_db(gain).clamp(-96.0, 96.0);
         }
+        let space = Space {
+            frame: self.b.p.sequence(seq).map_or((1920.0, 1080.0), |s| (f64::from(s.settings.width), f64::from(s.settings.height))),
+            source: self.picture_size(item),
+            in_point: clip.in_point.unwrap_or(0),
+            speed: if c.speed > 0.0 { c.speed } else { 1.0 },
+        };
+        super::effects::apply(g, ti.components.as_ref(), &mut c, &space, self.report);
         let nested = self.b.p.item(item).and_then(|i| i.as_sequence()).is_some();
         if clip.multicam && nested {
             let angle = clip.angle.and_then(|a| u32::try_from(a).ok()).unwrap_or(0);
@@ -510,6 +518,17 @@ impl Map<'_, '_> {
             }
         }
         Some(c)
+    }
+
+    /// The picture size of an item a clip plays (sequence size when it has none of its own).
+    fn picture_size(&self, item: ItemId) -> (f64, f64) {
+        let size = self.b.p.item(item).and_then(|i| match &i.kind {
+            ItemKind::Media(m) => m.info.video.as_ref().map(|v| (v.width, v.height)),
+            ItemKind::Sequence(s) => Some((s.settings.width, s.settings.height)),
+            ItemKind::Graphic { width, height, .. } => Some((*width, *height)),
+            _ => None,
+        });
+        size.filter(|(w, h)| *w > 0 && *h > 0).map_or((1920.0, 1080.0), |(w, h)| (f64::from(w), f64::from(h)))
     }
 
     fn markers(&mut self, r: Option<&Ref>) -> Vec<Marker> {

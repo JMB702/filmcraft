@@ -10,13 +10,16 @@
 //! rate, start timecode, In / Out, work area, markers), video and audio tracks, clips (timeline
 //! position and duration, source In, speed and reverse, frame holds, enabled state, clip gain, the
 //! channels an audio clip plays, links between video and audio), audio and video transitions,
-//! nested sequences, and multi-camera source sequences with each multi-camera clip's angle.
-//! Everything else (effects and their parameters, Essential Sound settings, track mute / solo /
-//! lock, captions and transcripts) is listed in the [`Report`].
+//! nested sequences, multi-camera source sequences with each multi-camera clip's angle, graphics
+//! (as empty graphic items), Generative Extend results, and the clip effects Motion (with its
+//! crop), Opacity, Transform and Volume, keyframes included (see `effects`). Everything else
+//! (other effects, blend modes, graphic text, Essential Sound settings, track mixer settings,
+//! captions and transcripts) is listed in the [`Report`].
 //!
 //! Real projects are large (hundreds of megabytes of XML): the document is walked once, and only
 //! the objects the importer uses are parsed, one at a time.
 
+mod effects;
 mod graph;
 mod map;
 pub(crate) mod scan;
@@ -63,15 +66,6 @@ pub fn import(bytes: &[u8], opts: &ImportOptions) -> crate::Result<(Imported, Ve
 /// One line per kind of Premiere data that the importer does not carry over.
 fn skipped_report(g: &graph::Graph, report: &mut Report) {
     let count = |classes: &[&str]| -> usize { classes.iter().filter_map(|c| g.skipped.get(*c)).sum() };
-    let video_fx = count(&["VideoFilterComponent"]);
-    if video_fx > 0 {
-        report
-            .warn(format!("{video_fx} video effect instance(s) (Motion, Opacity, Transform, Text, …) were not imported; clips use default Motion and Opacity"));
-    }
-    let audio_fx = count(&["AudioFilterComponent"]);
-    if audio_fx > 0 {
-        report.warn(format!("{audio_fx} audio effect instance(s) (Volume, Channel Volume, Essential Sound processing, …) were not imported"));
-    }
     if count(&["TranscriptClip", "ExternallyProvidedTranscriptDocument"]) > 0 {
         report.info("transcripts were not imported");
     }
