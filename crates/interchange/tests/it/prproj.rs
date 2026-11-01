@@ -791,8 +791,27 @@ fn real_project_from_env() {
             assert!(s.settings.validate().is_ok());
         }
     }
+    // every multi-camera source is cut by timeline clips with Multi-Camera on and an angle that
+    // names one of its cameras (the Multi-Camera view shows angles only for such clips)
+    let mut multicam_clips = 0usize;
+    for (id, cameras) in p.items.values().filter_map(|i| i.as_sequence().and_then(|s| s.multicam.as_ref()).map(|m| (i.id, m.cameras.len()))) {
+        let cuts: Vec<&filmcraft_project::MulticamSel> = p
+            .items
+            .values()
+            .filter_map(|i| i.as_sequence())
+            .flat_map(|s| s.all_tracks().flat_map(|t| &t.items))
+            .filter(|ti| ti.item == id)
+            .filter_map(|ti| ti.multicam.as_ref())
+            .collect();
+        assert!(!cuts.is_empty() && cuts.iter().all(|m| m.enabled && (m.angle as usize) < cameras), "{cameras} cameras");
+        multicam_clips += cuts.len();
+    }
     if std::env::var("FILMCRAFT_PRPROJ_DUMP").is_ok() {
-        println!("import took {elapsed:?}; {} items, {sequences} sequences, {} relink candidates", p.items.len(), relinks.len());
+        println!(
+            "import took {elapsed:?}; {} items, {sequences} sequences, {} relink candidates, {multicam_clips} multi-camera clips",
+            p.items.len(),
+            relinks.len()
+        );
         print!("{}", tree(p));
         print!("{report}");
         // effect counts over every clip
