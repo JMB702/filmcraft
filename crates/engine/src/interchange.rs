@@ -1,4 +1,5 @@
-//! Interchange documents (CMX 3600 EDL, FCP7 XML, FCPXML, OTIO, AAF, OMF) ↔ the session's project.
+//! Interchange documents (CMX 3600 EDL, FCP7 XML, FCPXML, OTIO, AAF, OMF, and Premiere Pro projects
+//! for import) ↔ the session's project.
 
 use serde_json::{Value, json};
 
@@ -9,7 +10,13 @@ use crate::{EngineError, Result, Session};
 
 /// File extensions of the interchange documents `file.import` reads (lower case). The Media
 /// Browser lists the same set.
-pub const EXTENSIONS: [&str; 7] = ["edl", "xml", "fcpxml", "otio", "aaf", "omf", "omfi"];
+pub const EXTENSIONS: [&str; 8] = ["edl", "xml", "fcpxml", "otio", "aaf", "omf", "omfi", "prproj"];
+
+/// Whether `path` / `bytes` are a Premiere Pro project (File ▸ Open converts them).
+pub fn is_premiere(path: &str, bytes: &[u8]) -> bool {
+    std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("prproj"))
+        && filmcraft_interchange::prproj::sniff(bytes)
+}
 
 /// The interchange format of a file, if it is one (by content, with the extension as a hint).
 pub fn detect(path: &str, bytes: &[u8]) -> Option<Format> {
@@ -55,12 +62,30 @@ fn write_embedded_audio(s: &Session, path: &str, wav: &[u8]) -> Result<String> {
 /// into `bin` (the Project panel's current bin, as for media files); the root when it is `None`
 /// or no longer exists.
 pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format, bin: Option<BinId>) -> Result<Value> {
+    let parsed = parse(s, path, bytes, format)?;
+    merge(s, path, format, parsed, bin)
+}
+
+/// A document read into a project fragment, not yet merged.
+pub struct Parsed {
+    fragment: filmcraft_interchange::Imported,
+    report: filmcraft_interchange::Report,
+    name: String,
+}
+
+fn options(path: &str) -> ImportOptions {
     let p = std::path::Path::new(path);
-    let opts = ImportOptions {
+    ImportOptions {
         base_dir: p.parent().map(|d| d.to_string_lossy().to_string()),
         name: p.file_stem().map(|n| n.to_string_lossy().to_string()),
         ..Default::default()
-    };
+    }
+}
+
+/// Read a document. Nothing in the session changes, except embedded audio written next to an AAF
+/// or OMF document.
+pub fn parse(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Result<Parsed> {
+    let opts = options(path);
     let (fragment, report) = match format {
         // AAF / OMF may embed audio: write it next to the document (the media items point there)
         Format::Aaf | Format::Omf => {
@@ -79,6 +104,22 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format, bin: Op
             }
             (fragment, report)
         }
+        // a Premiere project stores each file's absolute path and its path relative to the
+        // project: use the relative one when only it exists (the project folder was moved)
+        Format::Prproj => {
+            let (mut fragment, relinks, report) =
+                filmcraft_interchange::prproj::import(bytes, &opts).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+            for r in relinks {
+                if let Some(media) = fragment.project.item_mut(r.item).and_then(|item| item.as_media_mut())
+                    && let MediaRef::File { path: stored } = &media.media
+                    && s.services.file_size(stored).is_err()
+                    && s.services.file_size(&r.relative).is_ok()
+                {
+                    media.media = MediaRef::File { path: r.relative };
+                }
+            }
+            (fragment, report)
+        }
         _ => filmcraft_interchange::import_with(bytes, format, &opts).map_err(|e| EngineError::Other(format!("{path}: {e}")))?,
     };
     for item in fragment.project.items.values() {
@@ -86,8 +127,14 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format, bin: Op
             sequence.settings.validate().map_err(|e| EngineError::Other(format!("{path}: invalid imported sequence settings: {e}")))?;
         }
     }
+    let name = opts.name.unwrap_or_else(|| format.name().to_string());
+    Ok(Parsed { fragment, report, name })
+}
+
+/// Merge a read document into the project and link its media (see [`import`]).
+pub fn merge(s: &mut Session, path: &str, format: Format, parsed: Parsed, bin: Option<BinId>) -> Result<Value> {
+    let Parsed { fragment, report, name } = parsed;
     let before: std::collections::HashSet<ItemId> = s.project.items.keys().copied().collect();
-    let name = opts.name.clone().unwrap_or_else(|| format.name().to_string());
     let seqs = s.edit(&format!("Import {name}"), |proj, _| {
         let seqs = filmcraft_interchange::merge_into(proj, fragment, bin);
         // A document that sets only some Motion parameters leaves the others at their "auto"

@@ -1402,6 +1402,8 @@ mod project_panel_tests;
 #[cfg(test)]
 mod proxies_tests;
 #[cfg(test)]
+mod prproj_tests;
+#[cfg(test)]
 mod relink_tests;
 #[cfg(test)]
 mod remix_tests;
