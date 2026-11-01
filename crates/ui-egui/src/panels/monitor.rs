@@ -1077,6 +1077,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
             (Icon::Lift, "sequence.lift", tl!("Lift (;)")),
             (Icon::Extract, "sequence.extract", tl!("Extract (')")),
             (Icon::Camera, "exportFrame", tl!("Export Frame")),
+            (Icon::Multicam, "multicam.toggleView", tl!("Toggle Multi-Camera View (Shift+0)")),
             (Icon::Proxy, "media.toggleProxies", tl!("Toggle Proxies")),
         ]
     };
@@ -1175,6 +1176,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
                     "media.toggleProxies" => Some(app.session.media.use_proxies()),
                     "playback.loop" => Some(transport_loop_on(app, which == Which::Source)),
                     "playback.toggle" => Some(app.playback.playing),
+                    "multicam.toggleView" => Some(app.ui.program.multicam),
                     "source.playback.toggle" => Some(app.source_playback.clock.playing),
                     _ => None,
                 };
@@ -1194,10 +1196,11 @@ fn transport_loop_on(app: &FilmcraftApp, source: bool) -> bool {
     if source { app.source_playback.clock.looping } else { app.playback.looping }
 }
 
-fn transport_is_lit(command: &str, proxies_enabled: bool, loop_enabled: bool) -> bool {
+fn transport_is_lit(command: &str, proxies_enabled: bool, loop_enabled: bool, multicam_shown: bool) -> bool {
     match command {
         "media.toggleProxies" => proxies_enabled,
         "playback.loop" => loop_enabled,
+        "multicam.toggleView" => multicam_shown,
         _ => false,
     }
 }
@@ -1213,7 +1216,7 @@ fn transport_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, prefi
     let size = if matches!(command, "playback.toggle" | "source.playback.toggle") { 20.0 } else { 18.0 };
     // Loop shows as active (accent) while looping is on; both monitors use this command id, so check the prefix.
     let loop_enabled = transport_loop_on(app, prefix.starts_with("source"));
-    let color = if transport_is_lit(command, app.session.media.use_proxies(), loop_enabled) {
+    let color = if transport_is_lit(command, app.session.media.use_proxies(), loop_enabled, app.ui.program.multicam) {
         t.accent
     } else if response.hovered() {
         t.tab_text_active
@@ -1350,24 +1353,27 @@ mod tests {
         let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
         let ctx = egui::Context::default();
         for (source, params) in [(false, json!({"monitor": "program"})), (true, json!({"monitor": "source"}))] {
-            assert!(!transport_is_lit("playback.loop", false, transport_loop_on(&app, source)));
+            assert!(!transport_is_lit("playback.loop", false, transport_loop_on(&app, source), false));
             crate::menus::invoke(&mut app, &ctx, "playback.loop", params.clone()).unwrap();
-            assert!(transport_is_lit("playback.loop", false, transport_loop_on(&app, source)), "on after one toggle (source: {source})");
+            assert!(transport_is_lit("playback.loop", false, transport_loop_on(&app, source), false), "on after one toggle (source: {source})");
             assert!(transport_loop_on(&app, source) != transport_loop_on(&app, !source), "only that monitor loops");
             crate::menus::invoke(&mut app, &ctx, "playback.loop", params).unwrap();
-            assert!(!transport_is_lit("playback.loop", false, transport_loop_on(&app, source)), "off after the second (source: {source})");
+            assert!(!transport_is_lit("playback.loop", false, transport_loop_on(&app, source), false), "off after the second (source: {source})");
         }
     }
 
     #[test]
     fn loop_transport_is_lit_only_while_looping() {
-        assert!(!transport_is_lit("playback.loop", false, false));
-        assert!(transport_is_lit("playback.loop", false, true));
+        assert!(!transport_is_lit("playback.loop", false, false, true));
+        assert!(transport_is_lit("playback.loop", false, true, false));
 
-        assert!(!transport_is_lit("media.toggleProxies", false, true));
-        assert!(transport_is_lit("media.toggleProxies", true, false));
+        assert!(!transport_is_lit("media.toggleProxies", false, true, true));
+        assert!(transport_is_lit("media.toggleProxies", true, false, false));
 
-        assert!(!transport_is_lit("playback.toggle", true, true));
+        assert!(!transport_is_lit("multicam.toggleView", true, true, false));
+        assert!(transport_is_lit("multicam.toggleView", false, false, true));
+
+        assert!(!transport_is_lit("playback.toggle", true, true, true));
     }
 
     #[test]

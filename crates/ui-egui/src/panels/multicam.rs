@@ -10,6 +10,9 @@
 //! - Multi-Camera view: `program.multicam.grid`, `program.multicam.angle.<n>` (n = 1-based camera
 //!   in shown order, so cameras on page 2 of a 4×4 grid are 17…), `program.multicam.record`,
 //!   `program.multicam.pagePrev`, `program.multicam.pageNext` (when there is more than one page).
+//!   Without a multi-camera clip at the playhead: `program.multicam.empty` (why), `.empty.help`
+//!   and `.empty.action` (Create Multi-Camera Source Sequence…, Enable Multi-Camera, or Go to Next
+//!   Multi-Camera Clip). The Program transport's toggle is `program.transport.multicam.toggleView`.
 //! - Edit Cameras dialog (`multicam.editCamerasDialog`): `editCameras.name.<angle>`,
 //!   `editCameras.enabled.<angle>`, `editCameras.thumb.<angle>`, `editCameras.ok`, `editCameras.cancel`.
 //! - Synchronize: `sync.method.<in|out|timecode|marker|audio>`, `sync.ignoreHours`, `sync.marker`,
@@ -296,6 +299,95 @@ fn grid_revision(app: &FilmcraftApp, src: ItemId) -> u64 {
     h.finish()
 }
 
+/// Why the Multi-Camera view has no angles to show, and what gets the editor going.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Empty {
+    /// No sequence is open.
+    NoSequence,
+    /// The sequence holds no multi-camera clip: make one first.
+    NoMulticam,
+    /// The sequence holds multi-camera source sequences with Multi-Camera off: enable these clips.
+    NotEnabled(Vec<u64>),
+    /// The sequence has multi-camera clips, none under the playhead: the next one starts here.
+    NotAtPlayhead(Tick),
+}
+
+/// What the Multi-Camera view says when no multi-camera clip is at the playhead.
+pub fn empty_state(s: &filmcraft_engine::Session) -> Empty {
+    let Some(q) = s.active_sequence() else { return Empty::NoSequence };
+    let nests = || q.video_tracks.iter().flat_map(|t| t.items.iter()).filter(|i| s.project.sequence(i.item).is_some());
+    let mut starts: Vec<Tick> = nests().filter(|i| i.multicam.is_some_and(|m| m.enabled)).map(|i| i.start).collect();
+    if starts.is_empty() {
+        let off: Vec<u64> =
+            nests().filter(|i| s.project.sequence(i.item).is_some_and(|n| n.multicam.is_some()) || i.multicam.is_some()).map(|i| i.id.0).collect();
+        return if off.is_empty() { Empty::NoMulticam } else { Empty::NotEnabled(off) };
+    }
+    starts.sort_unstable();
+    let t = s.playhead();
+    let next = starts.iter().find(|&&x| x > t).or(starts.first()).copied().unwrap_or(Tick::ZERO);
+    Empty::NotAtPlayhead(next)
+}
+
+/// The Multi-Camera view without a multi-camera clip at the playhead: say why and offer the next
+/// step (create one, enable one, or go to one) instead of an empty grid.
+fn empty_grid(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect) {
+    let t = app.tokens;
+    let state = empty_state(&app.session);
+    let (title, body, action) = match &state {
+        Empty::NoSequence => (tl!("No sequence open"), tl!("Open a sequence to switch camera angles in the Multi-Camera view."), None),
+        Empty::NoMulticam => (
+            tl!("No multi-camera clips in this sequence"),
+            tl!("Select the camera clips, choose Clip > Create Multi-Camera Source Sequence…, then edit it into this sequence."),
+            Some((tl!("Create Multi-Camera Source Sequence…"), app.session.is_enabled("clip.createMulticam"))),
+        ),
+        Empty::NotEnabled(_) => (
+            tl!("Multi-Camera is off for these clips"),
+            tl!("This sequence holds multi-camera source sequences with Multi-Camera turned off (Clip > Multi-Camera > Enable)."),
+            Some((tl!("Enable Multi-Camera"), true)),
+        ),
+        Empty::NotAtPlayhead(_) => (
+            tl!("No multi-camera clip at the playhead"),
+            tl!("Move the playhead over a multi-camera clip to see its cameras."),
+            Some((tl!("Go to Next Multi-Camera Clip"), true)),
+        ),
+    };
+    let width = (area.width() - 32.0).clamp(40.0, 420.0);
+    let inner = Rect::from_center_size(area.center(), vec2(width, area.height().min(220.0)));
+    let mut clicked = false;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
+        let r = ui.label(RichText::new(title).size(13.0).color(t.text).strong());
+        app.auto.add("program.multicam.empty", r.rect, title);
+        ui.add_space(4.0);
+        let r = ui.add(egui::Label::new(RichText::new(body).size(11.5).color(t.text_dim)).wrap());
+        app.auto.add("program.multicam.empty.help", r.rect, body);
+        if state != Empty::NoSequence {
+            ui.label(RichText::new(tl!("Then click a camera here, or press 1–9, to switch angles.")).size(11.5).color(t.text_dim));
+        }
+        if let Some((label, enabled)) = action {
+            ui.add_space(8.0);
+            let r = ui.add_enabled(enabled, egui::Button::new(label));
+            app.auto.add_response("program.multicam.empty.action", &r, label);
+            if !enabled {
+                r.on_disabled_hover_text(tl!("Select the camera clips in the Project panel or the Timeline first"));
+            } else if r.clicked() {
+                clicked = true;
+            }
+        }
+    });
+    if !clicked {
+        return;
+    }
+    let result = match state {
+        Empty::NoSequence => Ok(Value::Null),
+        Empty::NoMulticam => route(app, "clip.createMulticam", &json!({})).unwrap_or(Ok(Value::Null)),
+        Empty::NotEnabled(clips) => app.session.execute("clip.multicamEnable", json!({"clips": clips, "enabled": true})).map_err(|e| e.to_string()),
+        Empty::NotAtPlayhead(at) => app.session.execute("playhead.set", json!({"time": at.0})).map_err(|e| e.to_string()),
+    };
+    if let Err(e) = result {
+        app.ui.status = e;
+    }
+}
+
 /// The angle grid of the Multi-Camera view in `area`.
 pub fn grid(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect) {
     let t = app.tokens;
@@ -305,7 +397,7 @@ pub fn grid(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect) {
     let playhead = app.session.playhead();
     let info = filmcraft_engine::multicam::inspect_at(&app.session, playhead);
     let Some(src) = info["source"].as_u64().map(ItemId) else {
-        ui.painter().text(area.center(), Align2::CENTER_CENTER, tl!("No multi-camera clip at the playhead"), Tokens::ui(12.0), t.text_dim);
+        empty_grid(app, ui, area);
         return;
     };
     let Some(q) = app.session.project.sequence(src) else { return };
