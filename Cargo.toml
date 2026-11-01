@@ -179,3 +179,12 @@ eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc79968157
 egui_demo_lib = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 egui_inspection = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
+
+# Docking tab underline (active_tab_line) lives on a craft-libs branch until it is upstream.
+[patch."https://github.com/storytold/craft-libs"]
+craft-docpath = { path = "../craft-libs/crates/docpath" }
+craft-fonts-build = { path = "../craft-libs/crates/fonts-build" }
+craft-i18n = { path = "../craft-libs/crates/i18n" }
+craft-media = { path = "../craft-libs/crates/media" }
+craft-ui = { path = "../craft-libs/crates/ui" }
+craft-update = { path = "../craft-libs/crates/update" }

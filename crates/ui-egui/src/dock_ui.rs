@@ -449,6 +449,8 @@ fn dock_style(ui: &egui::Ui, t: &Tokens) -> DockStyle {
     style.text = t.tab_text_active;
     style.inactive_text = t.tab_text;
     style.accent = t.focus;
+    style.active_tab_line = 2.0;
+    style.active_tab_whole = true;
     style.font = Tokens::ui(12.0);
     style
 }
