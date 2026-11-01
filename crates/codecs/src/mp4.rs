@@ -310,13 +310,19 @@ impl Mp4Source {
                 pixel_format: pixfmt_label(&entry.codec),
                 color,
                 // ProRes 4444 alpha comes from its first frame header (`open_reader`)
-                has_alpha: matches!(&entry.codec, CodecConfig::Apv(a) if a.chroma_format_idc == 4),
+                // QuickTime Animation keeps alpha at depth 32 (ARGB)
+                has_alpha: matches!(&entry.codec, CodecConfig::Apv(a) if a.chroma_format_idc == 4) || (entry.format.0 == *b"rle " && vp.depth == 32),
                 bitrate,
                 hdr: entry.video.as_ref().and_then(|v| hdr_metadata(v.mastering_display.as_ref(), v.content_light)),
             };
             if rotation % 2 == 1 {
                 (info.width, info.height) = (info.height, info.width);
                 info.par = (info.par.1, info.par.0);
+            }
+            if entry.format.0 == *b"rle "
+                && let Some(label) = filmcraft_qtrle::depth_label(vp.depth)
+            {
+                info.pixel_format = label;
             }
             if matches!(entry.codec, CodecConfig::Dnx { .. }) {
                 // the sample entry doesn't say which VC-3 compression ID it is: read the first frame header
@@ -712,6 +718,7 @@ fn codec_label(c: &CodecConfig) -> String {
         CodecConfig::Vp9(c) => format!("VP9 (Profile {})", c.profile),
         CodecConfig::Unknown { fourcc, .. } if fourcc.0 == *b"vp08" => "VP8".into(),
         CodecConfig::Unknown { fourcc, .. } if fourcc.0 == *b"raw " => "Uncompressed RGB".into(),
+        CodecConfig::Unknown { fourcc, .. } if fourcc.0 == *b"rle " => "QuickTime Animation".into(),
         CodecConfig::Unknown { fourcc, .. } if fourcc.0 == *b"2vuy" => "Uncompressed YUV 4:2:2".into(),
         CodecConfig::Unknown { fourcc, .. } if fourcc.0 == *b"v210" => "Uncompressed YUV 4:2:2 10-bit".into(),
         CodecConfig::Av1(c) => format!("AV1 ({} Profile)", ["Main", "High", "Professional"].get(c.seq_profile as usize).unwrap_or(&"Main")),

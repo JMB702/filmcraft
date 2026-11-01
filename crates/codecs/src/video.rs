@@ -947,6 +947,61 @@ pub fn dnx_factory(e: &SampleEntry) -> Option<Result<Box<dyn VideoDecoder>>> {
     matches!(e.codec, CodecConfig::Dnx { .. }).then(|| Ok(Box::new(DnxDecoder) as Box<dyn VideoDecoder>))
 }
 
+/// Our QuickTime Animation (`rle `) decoder. Delta frames rewrite only part of the previous
+/// picture, so it is not intra-only: decoding starts at a sample that codes every pixel.
+pub struct QtrleDecoder {
+    dec: filmcraft_qtrle::Decoder,
+}
+
+impl QtrleDecoder {
+    /// A decoder for a `rle ` sample entry: its size, depth and colour table.
+    pub fn new(e: &SampleEntry) -> Result<Self> {
+        let v = e.video.as_ref().ok_or_else(|| CodecError::Unsupported("QuickTime Animation without a video sample description".into()))?;
+        let table = match &e.codec {
+            CodecConfig::Unknown { raw, .. } => filmcraft_qtrle::color_table(raw),
+            _ => None,
+        };
+        let dec = filmcraft_qtrle::Decoder::new(u32::from(v.width), u32::from(v.height), v.depth, table.as_deref())
+            .map_err(|e| CodecError::Unsupported(e.to_string()))?;
+        Ok(Self { dec })
+    }
+}
+
+impl VideoDecoder for QtrleDecoder {
+    fn decode(&mut self, sample: &[u8], pts: i64) -> Result<Vec<DecodedFrame>> {
+        let picture = self.dec.decode(sample).map_err(|e| CodecError::Decode(e.to_string()))?;
+        let frame = VideoFrame {
+            width: self.dec.width(),
+            height: self.dec.height(),
+            data: filmcraft_frame::PixelData::Rgba8(picture),
+            color: filmcraft_color::ColorInfo::SRGB_FULL,
+            par: (1, 1),
+            pts: filmcraft_time::Tick::ZERO,
+        };
+        Ok(vec![DecodedFrame { pts, frame, draft: false }])
+    }
+    fn flush(&mut self) -> Vec<DecodedFrame> {
+        Vec::new()
+    }
+    fn reset(&mut self) {
+        self.dec.reset();
+    }
+    fn name(&self) -> &str {
+        "FilmCraft QuickTime Animation"
+    }
+    fn is_random_access(&self, sample: &[u8]) -> Option<bool> {
+        Some(self.dec.is_key_frame(sample))
+    }
+}
+
+/// QuickTime Animation (`rle `): any depth the codec has (1–32 bits, grey 33–40).
+pub fn qtrle_factory(e: &SampleEntry) -> Option<Result<Box<dyn VideoDecoder>>> {
+    if e.format.0 != *b"rle " || e.video.is_none() {
+        return None;
+    }
+    Some(QtrleDecoder::new(e).map(|d| Box::new(d) as Box<dyn VideoDecoder>))
+}
+
 /// Our MPEG-1 / MPEG-2 video decoder (Main / 4:2:2 profile, field and frame pictures).
 pub struct Mpeg2Decoder {
     dec: filmcraft_mpeg2v::Decoder,
