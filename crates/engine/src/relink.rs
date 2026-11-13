@@ -274,7 +274,12 @@ pub fn check_media(m: &MediaClip, pool: &MediaPool, services: &dyn Services, pat
             Ok(src) => {
                 let info = src.info().clone();
                 let fd = m.info.frame_rate().frame_duration();
-                if o.duration && m.info.duration > Tick::ZERO && (info.duration - m.info.duration).0.abs() > fd.0 {
+                // what the project records minus the file's own; a project without a
+                // fingerprint got its duration from another app (Premiere counts the longest
+                // stream, audio running a few frames past the last picture)
+                let over = (m.info.duration - info.duration).0;
+                let slack = if m.identity.is_none() { fd.0.saturating_mul(DURATION_SLACK_FRAMES) } else { fd.0 };
+                if o.duration && m.info.duration > Tick::ZERO && !(over <= slack && over.saturating_neg() <= fd.0) {
                     c.problems.push(format!("duration differs ({:.3}s vs {:.3}s)", info.duration.seconds(), m.info.duration.seconds()));
                 }
                 if o.media_start && info.start_timecode != m.info.start_timecode {
@@ -282,7 +287,7 @@ pub fn check_media(m: &MediaClip, pool: &MediaPool, services: &dyn Services, pat
                 }
                 if o.metadata {
                     if let (Some(a), Some(b)) = (&info.video, &m.info.video)
-                        && ((a.width, a.height) != (b.width, b.height) || a.frame_rate != b.frame_rate)
+                        && ((a.width, a.height) != (b.width, b.height) || !same_rate(a.frame_rate, b.frame_rate))
                     {
                         c.problems.push(format!(
                             "video differs ({}×{} {} vs {}×{} {})",
@@ -312,6 +317,18 @@ pub fn check_media(m: &MediaClip, pool: &MediaPool, services: &dyn Services, pat
     c.ok = c.problems.is_empty();
     c.score = u32::from(c.identity_match == Some(true)) * 8 + u32::from(name_ok) * 4 + u32::from(ext_ok) * 2 + u32::from(c.ok);
     Ok(c)
+}
+
+/// Frames the duration a project without a fingerprint records may run past the file's: other
+/// apps count the longest stream (Premiere: audio a few frames past the last picture). Measured on
+/// real Premiere projects: 2 to 3 frames.
+pub const DURATION_SLACK_FRAMES: i64 = 4;
+
+/// Whether two frame rates are the same rate: equal within 0.01% (another app may store 29.97 as
+/// a fraction a few millionths off 30000/1001; 29.97 and 30 differ by 0.1%).
+pub fn same_rate(a: filmcraft_time::FrameRate, b: filmcraft_time::FrameRate) -> bool {
+    let (x, y) = (a.as_f64(), b.as_f64());
+    a == b || (x.is_finite() && y.is_finite() && y > 0.0 && ((x - y) / y).abs() < 1e-4)
 }
 
 /// The folder remap implied by a file moving from `old` to `new`: the longest common trailing

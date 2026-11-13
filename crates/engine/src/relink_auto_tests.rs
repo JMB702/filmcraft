@@ -590,3 +590,141 @@ fn a_report_lists_what_was_linked_from_where() {
     assert_eq!(row["name"], json!("a.mov"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The native host, except that no file but `keep` exists: a project opened through it has all
+/// of its media missing, as on a computer without the media drive.
+struct OnlyDocument {
+    keep: String,
+}
+
+impl Services for OnlyDocument {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        if path == self.keep { FsServices.read_file(path) } else { Err(std::io::ErrorKind::NotFound.into()) }
+    }
+    fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    }
+    fn file_size(&self, path: &str) -> std::io::Result<u64> {
+        if path == self.keep { FsServices.file_size(path) } else { Err(std::io::ErrorKind::NotFound.into()) }
+    }
+}
+
+/// Accuracy on a real Premiere project (`FILMCRAFT_RELINK_SAMPLE=<path to .prproj>`; skipped
+/// without it). Read-only: nothing is written. Prints counts only.
+///
+/// 1. The project is opened as if none of its media were on this computer, so every item has only
+///    what the `.prproj` records (no fingerprint), then each item's real file is judged under the
+///    automatic rules: how many would link by themselves once found.
+/// 2. Each item's stored path is replaced by one on a drive that is gone, and the search runs on
+///    the real disk (the project's folders, drives, Spotlight): every link it makes must be the
+///    item's real file. A wrong link fails the test.
+#[test]
+fn real_project_from_env() {
+    let Ok(doc) = std::env::var("FILMCRAFT_RELINK_SAMPLE") else { return };
+    let mut s = Session::new(Arc::new(OnlyDocument { keep: doc.clone() }));
+    s.execute("file.open", json!({"path": doc})).unwrap();
+    let truth: Vec<(ItemId, String)> = s
+        .project
+        .items
+        .values()
+        .filter_map(|i| match &i.as_media()?.media {
+            MediaRef::File { path } if Path::new(path).is_file() => Some((i.id, path.clone())),
+            _ => None,
+        })
+        .collect();
+    let media_items = s.project.items.values().filter(|i| i.as_media().is_some_and(|m| matches!(m.media, MediaRef::File { .. }))).count();
+    eprintln!("media items: {media_items}, with their file on disk: {}", truth.len());
+    // 1. judged directly
+    let pool = crate::MediaPool::default();
+    let mut pass = 0;
+    let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+    for (id, path) in &truth {
+        let m = s.project.item(*id).unwrap().as_media().unwrap();
+        match crate::relink_auto::judge(m, &pool, &FsServices, path) {
+            crate::relink_auto::Verdict::Pass(_) => pass += 1,
+            crate::relink_auto::Verdict::Fail(c) => {
+                for p in c.problems {
+                    // the kind of problem, without names or numbers
+                    let kind: String = p.split(['(', ':']).next().unwrap_or_default().trim().to_string();
+                    *reasons.entry(kind).or_default() += 1;
+                }
+            }
+            crate::relink_auto::Verdict::Cloud => *reasons.entry("in iCloud".into()).or_default() += 1,
+        }
+    }
+    eprintln!("judged against their own file: {pass} pass, {} fail; reasons: {reasons:?}", truth.len() - pass);
+    // 2. searched for from a drive that is gone
+    let wants: Vec<Want> = truth
+        .iter()
+        .map(|(id, path)| {
+            let mut media = s.project.item(*id).unwrap().as_media().unwrap().clone();
+            let gone = format!("/Volumes/FilmCraftGoneDrive/{}", crate::relink::file_name(path));
+            media.media = MediaRef::File { path: gone.clone() };
+            Want { item: *id, path: gone, alternates: vec![], media }
+        })
+        .collect();
+    let mut search = Search { wants, document: Some(doc.clone()), index: true, ..Default::default() };
+    search.roots = FsServices.volumes().into_iter().map(|v| v.path).collect();
+    let t = std::time::Instant::now();
+    let o = crate::relink_auto::run(&search, &pool, &FsServices);
+    let real: std::collections::HashMap<ItemId, String> = truth.iter().cloned().collect();
+    let canon = |p: &str| std::fs::canonicalize(p).ok();
+    let (mut right, mut wrong) = (0, 0);
+    for l in &o.linked {
+        if canon(&l.cand.path).is_some() && canon(&l.cand.path) == real.get(&l.item).and_then(|r| canon(r)) {
+            right += 1;
+        } else {
+            wrong += 1;
+        }
+    }
+    let mut vias: std::collections::BTreeMap<&str, usize> = Default::default();
+    for l in &o.linked {
+        *vias.entry(l.via.label()).or_default() += 1;
+    }
+    eprintln!(
+        "search ({:.1}s, {} files listed, truncated: {}): linked {right} right, {wrong} wrong; ask {}; download {}; not found {}; found via {vias:?}",
+        t.elapsed().as_secs_f64(),
+        o.files_seen,
+        o.truncated,
+        o.ambiguous.len(),
+        o.cloud.len(),
+        o.not_found.len()
+    );
+    assert_eq!(wrong, 0, "a wrong link");
+}
+
+#[test]
+fn rates_a_few_millionths_apart_are_the_same_rate() {
+    use crate::relink::same_rate;
+    use filmcraft_time::FrameRate;
+    assert!(same_rate(FrameRate::new(30000, 1001), FrameRate::new(127_008_000_000, 4_237_825_133)));
+    assert!(!same_rate(FrameRate::new(30000, 1001), FrameRate::new(30, 1)));
+    assert!(!same_rate(FrameRate::new(25, 1), FrameRate::new(0, 0)), "a degenerate rate matches nothing");
+}
+
+#[test]
+fn without_a_fingerprint_a_recorded_duration_a_few_frames_longer_still_matches() {
+    let root = tmp_dir("auto-slack");
+    let (path, items) = saved(&root, &["a.mov", "b.mov"]);
+    forget_fingerprints(&path);
+    // the project says 3 frames more than the file has (Premiere counts trailing audio); b says 6
+    let mut s = Session::default();
+    s.execute("file.open", json!({"path": path})).unwrap();
+    let fd = s.project.item(items[0]).unwrap().as_media().unwrap().info.frame_rate().frame_duration();
+    s.edit("longer", |p, _| {
+        for (id, n) in [(items[0], 3), (items[1], 6)] {
+            let m = p.item_mut(id).unwrap().as_media_mut().unwrap();
+            m.info.duration += filmcraft_time::Tick(fd.0 * n);
+        }
+        Ok(())
+    })
+    .unwrap();
+    s.execute("file.save", json!({"path": path})).unwrap();
+    std::fs::rename(root.join("Media"), root.join("Moved")).unwrap();
+    let mut s = open_with(&path, Arc::new(Host::default()));
+    let r = find(&mut s);
+    let linked: Vec<u64> = r["relinked"].as_array().unwrap().iter().filter_map(|l| l["item"].as_u64()).collect();
+    assert_eq!(linked, vec![items[0].0], "{r}");
+    assert_eq!(ids(&r["needYou"]), vec![items[1].0]);
+    let _ = std::fs::remove_dir_all(&root);
+}
