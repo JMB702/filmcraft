@@ -340,8 +340,9 @@ fn apply(s: &mut Session, plans: Vec<Plan>, align_timecode: bool, label: &str) -
             if let Some(info) = &p.cand.info {
                 let new_tc = info.start_timecode;
                 if align_timecode && let (Some(a), Some(b)) = (old_tc, new_tc) {
-                    // what was at old timecode a + t sits at new media time t + (a - b)
-                    shift = rate.tick_of(b - a);
+                    // what was at old timecode a + t sits at new media time t + (a - b), each
+                    // timecode in its own file's frames (an EDL item's are at the list's rate)
+                    shift = info.frame_rate().tick_of(b) - rate.tick_of(a);
                 }
                 m.info = info.clone();
             }
@@ -531,7 +532,11 @@ pub fn search(s: &Session, p: &Value) -> Result<Value> {
                 continue;
             }
             for f in paths {
-                if let Ok(c) = check_candidate(s, id, &f.to_string_lossy(), &o) {
+                if let Ok(mut c) = check_candidate(s, id, &f.to_string_lossy(), &o) {
+                    // results are listed, not played: holding every candidate's decoder (and a
+                    // decoded still for each alias of one image) kept them all in memory;
+                    // relinking reopens the chosen file
+                    c.source = None;
                     cands.push(c);
                 }
             }
@@ -643,6 +648,7 @@ pub fn commands() -> Vec<CommandSpec> {
                 Ok(json!({"missing": list}))
             },
             journal: false,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "media.status",
@@ -659,6 +665,7 @@ pub fn commands() -> Vec<CommandSpec> {
                 Ok(Value::Array(ids.into_iter().filter_map(|i| status_json(s, i)).collect()))
             },
             journal: false,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "media.linkMedia",
@@ -673,6 +680,7 @@ pub fn commands() -> Vec<CommandSpec> {
                 Ok(json!({"missing": list}))
             },
             journal: false,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "media.relink",
@@ -683,6 +691,7 @@ pub fn commands() -> Vec<CommandSpec> {
             enabled: always,
             run: relink,
             journal: true,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "media.refreshChanged",
@@ -693,6 +702,7 @@ pub fn commands() -> Vec<CommandSpec> {
             enabled: always,
             run: crate::media_watch::refresh_changed,
             journal: true,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "media.replaceFootage",
@@ -708,6 +718,7 @@ pub fn commands() -> Vec<CommandSpec> {
                 relink(s, &q)
             },
             journal: true,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "media.autoRelink",
@@ -718,6 +729,7 @@ pub fn commands() -> Vec<CommandSpec> {
             enabled: always,
             run: auto_relink,
             journal: true,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "media.search",
@@ -728,6 +740,7 @@ pub fn commands() -> Vec<CommandSpec> {
             enabled: always,
             run: |s, p| search(s, p),
             journal: false,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "media.makeOffline",
@@ -745,6 +758,7 @@ pub fn commands() -> Vec<CommandSpec> {
             },
             run: make_offline,
             journal: true,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "media.offlineAll",
@@ -755,6 +769,7 @@ pub fn commands() -> Vec<CommandSpec> {
             enabled: always,
             run: offline_all,
             journal: true,
+            named: crate::commands::NamedKeys::NONE,
         },
     ]
 }

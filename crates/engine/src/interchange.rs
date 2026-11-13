@@ -98,8 +98,12 @@ pub struct Parsed {
 
 fn options(path: &str) -> ImportOptions {
     let p = std::path::Path::new(path);
+    // A relative document is taken from the working directory, as `doc_path::resolve` takes it.
+    // Its media paths then come out absolute, and following them as paths stored in the document
+    // doesn't join its folder a second time (#4001).
+    let document = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
     ImportOptions {
-        base_dir: p.parent().map(|d| d.to_string_lossy().to_string()),
+        base_dir: document.parent().map(|d| d.to_string_lossy().to_string()),
         name: p.file_stem().map(|n| n.to_string_lossy().to_string()),
         ..Default::default()
     }
