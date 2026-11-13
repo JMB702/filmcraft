@@ -5368,6 +5368,10 @@ pub(crate) fn install_project(s: &mut Session, proj: filmcraft_project::Project,
     s.media = std::sync::Arc::new(crate::MediaPool::default());
     s.media.set_use_proxies(proxies);
     s.offline = Default::default();
+    // downloads and the last automatic relink belong to the project being closed
+    s.relink_auto.before.clear();
+    s.relink_auto.quiet = false;
+    s.relink_auto.downloads = Default::default();
     let first = proj.sequences().next().map(|i| i.id);
     s.media.add_stored(&proj, path.as_deref());
     s.project = std::sync::Arc::new(proj);
@@ -5425,6 +5429,8 @@ fn open_premiere(s: &mut Session, path: &str, bytes: &[u8]) -> Result<Value> {
     let parsed = crate::interchange::parse(s, path, bytes, format)?;
     let name = std::path::Path::new(path).file_stem().map_or_else(|| "Premiere Project".to_string(), |n| n.to_string_lossy().into_owned());
     install_project(s, filmcraft_project::Project::new(&name), None, true);
+    // the automatic relink searches from the Premiere project's folder
+    s.offline.document = Some(path.to_string());
     let imported = crate::interchange::merge(s, path, format, parsed, None)?;
     // the converted project is where its history starts, and it has never been saved
     s.history = Default::default();

@@ -48,6 +48,8 @@ pub mod project_panel;
 pub mod project_tools;
 pub mod proxies;
 pub mod relink;
+pub mod relink_auto;
+pub mod relink_cloud;
 pub mod remix;
 pub mod scene_detect;
 pub mod scopes;
@@ -221,6 +223,25 @@ pub trait Services: Send + Sync {
     fn home_dir(&self) -> Option<String> {
         None
     }
+    /// Files the system's search index (Spotlight on macOS) knows by one of `names` (matched
+    /// without regard to case) or by a size in `sizes` (bytes), waiting at most `timeout`. `None`:
+    /// the host has no index; the automatic relink then searches folders only.
+    fn find_indexed(&self, _names: &[String], _sizes: &[u64], _timeout: std::time::Duration) -> Option<std::io::Result<Vec<String>>> {
+        None
+    }
+    /// Whether `path` is a cloud placeholder: its contents are not on this computer.
+    fn is_cloud_placeholder(&self, _path: &str) -> bool {
+        false
+    }
+    /// Bring a cloud placeholder's contents onto this computer, blocking until they are here
+    /// (worker threads only: minutes for a large file).
+    fn materialize(&self, _path: &str) -> std::io::Result<()> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "this host cannot download cloud files"))
+    }
+    /// Free bytes on the drive holding `path`. `None`: unknown.
+    fn free_space(&self, _path: &str) -> Option<u64> {
+        None
+    }
 }
 
 /// Native filesystem services.
@@ -274,6 +295,19 @@ impl Services for FsServices {
     }
     fn home_dir(&self) -> Option<String> {
         media_browser::std_home_dir()
+    }
+    #[cfg(target_os = "macos")]
+    fn find_indexed(&self, names: &[String], sizes: &[u64], timeout: std::time::Duration) -> Option<std::io::Result<Vec<String>>> {
+        Some(relink_auto::spotlight(names, sizes, timeout))
+    }
+    fn is_cloud_placeholder(&self, path: &str) -> bool {
+        filmcraft_media::reader::is_cloud_placeholder(std::path::Path::new(path))
+    }
+    fn materialize(&self, path: &str) -> std::io::Result<()> {
+        filmcraft_media::reader::materialize(std::path::Path::new(path))
+    }
+    fn free_space(&self, path: &str) -> Option<u64> {
+        relink_cloud::free_space(path)
     }
     /// A cloud placeholder is refused, as [`filmcraft_media::reader::FileReader::open`] does:
     /// reading it would wait for its download.
@@ -587,6 +621,8 @@ pub struct Session {
     pub media_stamps: std::collections::HashMap<String, media_watch::Stamp>,
     /// The stamps being taken on a worker thread ([`Session::start_media_scan`]).
     pub media_scan: Option<media_watch::MediaScan>,
+    /// Automatic relinking's worker threads ([`Session::start_auto_relink`], iCloud downloads).
+    pub relink_auto: relink_auto::Runtime,
 }
 
 /// An export advanced a batch at a time on the host's thread ([`Session::pump_jobs`]).
@@ -682,6 +718,7 @@ impl Session {
             command_origin: None,
             media_stamps: Default::default(),
             media_scan: None,
+            relink_auto: Default::default(),
         }
     }
 
@@ -1490,6 +1527,8 @@ mod project_panel_tests;
 mod proxies_tests;
 #[cfg(test)]
 mod prproj_tests;
+#[cfg(test)]
+mod relink_auto_tests;
 #[cfg(test)]
 mod relink_tests;
 #[cfg(test)]

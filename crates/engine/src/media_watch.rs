@@ -105,11 +105,14 @@ impl Session {
         // Only the files the project uses now are remembered.
         let before: HashMap<String, Stamp> = std::mem::take(&mut self.media_stamps);
         let mut changed = BTreeSet::new();
+        let mut vanished = Vec::new();
         for (path, stamp) in now {
             match (before.get(&path), stamp) {
                 // Not there right now (an app saving by delete and rename): keep the last stamp.
+                // If it stays away (moved or renamed), the automatic relink looks for it.
                 (Some(old), None) => {
-                    self.media_stamps.insert(path, *old);
+                    self.media_stamps.insert(path.clone(), *old);
+                    vanished.push(path);
                 }
                 (old, Some(new)) => {
                     if old.is_some_and(|o| *o != new) {
@@ -120,6 +123,7 @@ impl Session {
                 (None, None) => {}
             }
         }
+        self.note_vanished(&vanished);
         if changed.is_empty() {
             return Ok(json!({"refreshed": []}));
         }
