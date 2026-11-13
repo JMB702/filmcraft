@@ -1,6 +1,7 @@
 //! Headless UI tests of media management: the Link Media dialog opening for a project whose media
 //! moved (search a folder, link, the others follow), Project panel offline / proxy badges, the
-//! monitors' Toggle Proxies button, Create Proxies and Project Manager dialogs.
+//! monitors' Toggle Proxies button, the automatic relink on open (Relink Report, undo, pre-filled
+//! candidates), Create Proxies and Project Manager dialogs.
 //!
 //! Set `FILMCRAFT_UI_SNAPSHOT_DIR=<dir>` to also render the window offscreen with wgpu and write PNGs
 //! there (`media-*.png`).
@@ -394,6 +395,8 @@ fn link_media_dialog_relinks_moved_media() {
     let root = tmp_dir("link");
     let path = moved_project(&root);
     let mut s = Session::default();
+    // the manual dialog under test: the automatic search would find the moved folder first
+    s.prefs.media.auto_relink = false;
     s.execute("file.open", json!({"path": path})).unwrap();
     let mut d = Driver::new(s);
     d.frames(6);
@@ -422,6 +425,8 @@ fn offline_badges_proxy_toggle_and_dialogs() {
     let root = tmp_dir("badges");
     let path = moved_project(&root);
     let mut s = Session::default();
+    // the manual dialog under test: the automatic search would find the moved folder first
+    s.prefs.media.auto_relink = false;
     s.execute("file.open", json!({"path": path})).unwrap();
     let mut d = Driver::new(s);
     d.frames(4);
@@ -483,6 +488,8 @@ fn locate_relinks_instead_of_importing() {
     let root = tmp_dir("locate");
     let path = moved_project(&root);
     let mut s = Session::default();
+    // the manual dialog under test: the automatic search would find the moved folder first
+    s.prefs.media.auto_relink = false;
     s.execute("file.open", json!({"path": path})).unwrap();
     let mut d = Driver::new(s);
     d.frames(6);
@@ -522,6 +529,78 @@ fn locate_relinks_instead_of_importing() {
     let st = d.exec("media.status", json!({}));
     assert!(st.as_array().unwrap().iter().all(|m| m["status"] == "online"), "item {item}: {st}");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A project root three levels below its own temporary folder, so the search's parent-folder walk
+/// (two levels) never reaches another test's identical media in the shared temporary directory.
+fn isolated_root(name: &str) -> (PathBuf, PathBuf) {
+    let base = tmp_dir(name);
+    let root = base.join("a").join("b").join("c");
+    std::fs::create_dir_all(&root).unwrap();
+    (base, root)
+}
+
+/// Frames until the automatic search started on open has finished and been applied.
+fn wait_auto(d: &mut Driver) {
+    use filmcraft_engine::relink_auto::AutoState;
+    for _ in 0..1200 {
+        d.frames(1);
+        if d.app().session.offline.auto == AutoState::Idle && d.app().session.offline.report.is_some() {
+            d.frames(3);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the automatic relink did not finish");
+}
+
+/// Media moved next to the project comes back by itself on open: no Link Media dialog, the Relink
+/// Report lists what was linked from where, and Undo Automatic Relink puts the clips back offline.
+#[test]
+fn auto_relink_on_open_reports_and_undoes() {
+    let (base, root) = isolated_root("auto");
+    let path = moved_project(&root);
+    let mut s = Session::default();
+    s.execute("file.open", json!({"path": path})).unwrap();
+    let mut d = Driver::new(s);
+    wait_auto(&mut d);
+    assert!(d.app().ui.link_media.is_none(), "nothing needs the user");
+    assert!(d.app().ui.relink_report, "the report opened");
+    assert_eq!(d.ids("relinkReport.row.").len(), 2);
+    let st = d.exec("media.status", json!({}));
+    assert!(st.as_array().unwrap().iter().all(|m| m["status"] == "online"), "{st}");
+    d.snapshot("media-relink-report");
+    d.click("relinkReport.undo");
+    let st = d.exec("media.status", json!({}));
+    assert!(st.as_array().unwrap().iter().all(|m| m["status"] != "online"), "undone: {st}");
+    assert!(d.app().session.offline.report.as_ref().is_some_and(|r| r.undone));
+    d.click("relinkReport.close");
+    assert!(!d.app().ui.relink_report);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A file with the clip's name whose fingerprint differs is never linked: Link Media opens with it
+/// listed as a candidate, nothing selected, while the clip that did match is linked.
+#[test]
+fn auto_relink_leaves_mismatch_to_link_media_prefilled() {
+    let (base, root) = isolated_root("auto-ask");
+    let path = moved_project(&root);
+    let impostor = root.join("Moved/Media/Harbour.mov");
+    std::fs::remove_file(&impostor).unwrap();
+    make_movie(&impostor, DemoScene::Forest, 640, 360, 24);
+    let mut s = Session::default();
+    s.execute("file.open", json!({"path": path})).unwrap();
+    let mut d = Driver::new(s);
+    wait_auto(&mut d);
+    assert!(!d.app().ui.relink_report, "Link Media comes first when something needs the user");
+    let dialog = d.app().ui.link_media.clone().expect("Link Media opened");
+    assert_eq!(dialog.candidates.len(), 1, "{:?}", dialog.candidates);
+    assert!(!dialog.candidates[0].1, "the impostor does not match");
+    assert_eq!(dialog.candidate, None, "nothing picked for the user");
+    assert_eq!(d.ids("linkMedia.row.").len(), 1, "the other clip was linked automatically");
+    assert!(!d.ids("linkMedia.report").is_empty());
+    d.snapshot("media-relink-prefilled");
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// [`make_movie`]'s ProRes file with its sample entry retyped `icod`: an Apple Intermediate Codec

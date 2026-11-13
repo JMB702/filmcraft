@@ -335,6 +335,10 @@ have no identity, so relinking them skips the fingerprint check.
 | `media.search {folder, item?, exactName?=true}` | ranked candidates with `ok`, `identityMatch`, `problems` |
 | `media.replaceFootage {item, path}` | relink without checks (Replace Footage) |
 | `media.offlineAll` | close the dialog and leave the rest offline |
+| `media.findAndLink {index?=true, parentLevels?=2, timeLimit?}` | the automatic search, run now and applied: `{summary, relinked, needYou, downloading, notFound, filesSeen, truncated}` |
+| `media.undoAutoRelink` | put back offline what the last automatic relink linked (also an ordinary undo step) |
+| `media.relinkReport` | File ▸ Relink Report…: what was linked, from where, on which signals |
+| `media.downloadFromCloud {items?, force?}` | download iCloud placeholders; `force` skips the free-space guard |
 
 `match` selects which properties must agree. Each defaults as shown:
 
@@ -355,6 +359,37 @@ timecode: the clips' source in-points, keyframes, marks and markers move with it
 linked, because the list's source times are timecodes; relink it with Align Timecode to land on the
 same frames as importing the EDL next to its media. One relink, together with the files it pulls
 along, is one undo step.
+
+#### Automatic relink
+
+With **Media ▸ Find missing media automatically** on (`media.autoRelink` preference, the default),
+opening or importing a project with missing media starts a background search; the app stays usable
+and Link Media waits for it. The search is capped (200 000 files, 30 s) and looks, in order, at the
+stored and project-relative paths, folder remaps already learned, the project folder and up to two
+parent levels, folders that held other found media, the same trailing path on other drives, and
+macOS Spotlight. A remap learned from one found file is applied to the rest.
+
+A file links only when it is the one candidate that passes every signal the clip has. A clip with
+a fingerprint (`clipId`) needs the fingerprint to match, so a renamed file is found and a same-named
+impostor is not. A clip without one (a `.prproj` import) needs the name, extension, duration (Premiere
+records up to four frames more than the file holds), size, frame rate, frame size, audio, sample rate
+and start timecode to agree, with no other file that also passes; copies with the same contents do
+not count as rivals. Its fingerprint is recorded once linked. Anything else goes to Link Media with
+the candidates the search found pre-filled and the matching one selected (none when none matches).
+All automatic links are one undo step ("Automatic Relink"). A file that disappears while the project
+is open (moved or renamed; the media re-check runs every 60 s and when the window gains focus) is
+searched for quietly the same way.
+
+Media stored in iCloud (a placeholder on disk) is downloaded instead of sending the user to Finder,
+when the free space after the download keeps a 10 GB margin; each clip comes online when its file
+lands, and a downloaded file that turns out not to match is listed in Link Media instead. The status
+bar shows one summary ("Relinked 41 automatically, 2 need you, 3 downloading from iCloud") and the
+Relink Report lists each link with where it was found. Progress per download is elapsed time and
+size, not bytes.
+
+Relink Report automation ids: `relinkReport.row.<n>`, `relinkReport.undo`,
+`relinkReport.linkMedia`, `relinkReport.close`, and `linkMedia.download.<n>` / `linkMedia.report`
+in Link Media.
 
 Link Media dialog automation ids: `linkMedia.row.<n>`,
 `linkMedia.match.<fileName|extension|clipId|duration|mediaStart|metadata>`, `linkMedia.alignTimecode`,

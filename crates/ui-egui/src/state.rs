@@ -578,6 +578,9 @@ pub struct UiState {
     /// Link Media dialog (open when Some).
     #[serde(default)]
     pub link_media: Option<LinkMediaDraft>,
+    /// File ▸ Relink Report… window (what the automatic relink did; opens after one).
+    #[serde(default)]
+    pub relink_report: bool,
     /// Create Proxies dialog (open when Some).
     #[serde(default)]
     pub create_proxies: Option<ProxyDraft>,
@@ -758,6 +761,8 @@ pub struct LinkMediaDraft {
     /// Rows the user set offline in this session of the dialog (item ids).
     pub skipped: Vec<u64>,
     pub message: String,
+    /// The item whose candidates were last filled in from the automatic search.
+    pub prefilled: Option<u64>,
 }
 
 impl Default for LinkMediaDraft {
@@ -778,6 +783,7 @@ impl Default for LinkMediaDraft {
             candidate: None,
             skipped: vec![],
             message: String::new(),
+            prefilled: None,
         }
     }
 }
@@ -1058,6 +1064,7 @@ impl Default for UiState {
             gfx_edit: None,
             pen_points: vec![],
             link_media: None,
+            relink_report: false,
             create_proxies: None,
             project_manager: None,
             make_offline: None,

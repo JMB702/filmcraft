@@ -883,6 +883,7 @@ pub fn apply_outcome(s: &mut Session, o: Outcome, quiet: bool) -> Result<Value> 
         "notFound": report.not_found,
         "filesSeen": report.files_seen,
         "truncated": report.truncated,
+        "quiet": quiet,
     });
     if !(quiet && report.linked.is_empty()) {
         s.toast(summary);

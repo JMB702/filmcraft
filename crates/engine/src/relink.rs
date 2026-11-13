@@ -809,8 +809,8 @@ pub fn commands() -> Vec<CommandSpec> {
         },
         CommandSpec {
             id: "media.relinkReport",
-            label: "Relink Report",
-            menu: &[],
+            label: "Relink Report…",
+            menu: &["File"],
             shortcut: None,
             params: "{}  (what the last automatic relink did, the candidates waiting for you, and iCloud downloads)",
             enabled: always,

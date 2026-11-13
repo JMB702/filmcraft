@@ -8,6 +8,8 @@
 //!   `linkMedia.alignTimecode`, `linkMedia.relinkOthers`, `linkMedia.folder`, `linkMedia.browse`,
 //!   `linkMedia.exactName`, `linkMedia.search`, `linkMedia.candidate.<n>`, `linkMedia.preview`,
 //!   `linkMedia.link`, `linkMedia.locate`, `linkMedia.offline`, `linkMedia.offlineAll`, `linkMedia.cancel`.
+//!   `linkMedia.download.<n>` (an iCloud download waiting for the user), `linkMedia.report`.
+//! - Relink Report: `relinkReport.row.<n>`, `relinkReport.undo`, `relinkReport.linkMedia`, `relinkReport.close`.
 //! - Make Offline: `makeOffline.keep`, `makeOffline.delete`, `makeOffline.ok`, `makeOffline.cancel`.
 //! - Create Proxies: `proxies.preset.<id>`, `proxies.destination`, `proxies.browse`, `proxies.ok`, `proxies.cancel`.
 //! - Project Manager: `pm.seq.<id>`, `pm.mode.<collect|consolidate>`, `pm.preset.<id>`, `pm.excludeUnused`,
@@ -33,7 +35,9 @@ fn mb(b: u64) -> String {
 
 /// Draw whichever media dialogs are open; open Link Media when a project needs it.
 pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
-    if app.session.offline.prompt && app.ui.link_media.is_none() {
+    // while the automatic search runs, Link Media waits for what it can't decide
+    let searching = app.session.offline.auto != filmcraft_engine::relink_auto::AutoState::Idle;
+    if app.session.offline.prompt && app.ui.link_media.is_none() && !searching {
         // Asked on open: list only the newly missing files, not the ones already made offline.
         let s = &app.session;
         let skipped = s.offline.missing.iter().filter(|i| s.project.item(**i).and_then(|it| it.as_media()).is_some_and(|m| m.offline)).map(|i| i.0).collect();
@@ -41,6 +45,9 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     }
     if app.ui.link_media.is_some() {
         link_media(app, ctx);
+    }
+    if app.ui.relink_report {
+        relink_report(app, ctx);
     }
     if app.ui.make_offline.is_some() {
         make_offline(app, ctx);
@@ -71,6 +78,10 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
             }
             app.ui.link_media = Some(LinkMediaDraft::default());
             Some(r)
+        }
+        "media.relinkReport" => {
+            app.ui.relink_report = true;
+            Some(app.session.execute("media.relinkReport", json!({})).map_err(|e| e.to_string()))
         }
         "media.makeOffline" => Some(enabled(app, id).map(|_| {
             app.ui.make_offline = Some(false);
@@ -155,6 +166,12 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
         return;
     }
     d.row = d.row.min(rows.len() - 1);
+    let row_item = rows[d.row].0;
+    prefill(app, &mut d, row_item);
+    let downloads: Vec<filmcraft_engine::relink_cloud::Download> =
+        app.session.offline.downloads.iter().filter(|x| x.state != filmcraft_engine::relink_cloud::DlState::Done).cloned().collect();
+    let has_report = app.session.offline.report.is_some();
+    let mut download: Option<u64> = None;
     let mut elems: Elems = Vec::new();
     let mut keep = true;
     let mut action: Option<&str> = None;
@@ -282,9 +299,20 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 if !d.message.is_empty() {
                     ui.colored_label(Color32::from_rgb(0xe0, 0x8a, 0x6a), &d.message);
                 }
+                if !downloads.is_empty() {
+                    ui.separator();
+                    download = downloads_list(ui, &downloads, &mut elems);
+                }
             });
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
+                if has_report {
+                    let r = ui.button(tl!("Relink Report…"));
+                    push(&mut elems, "linkMedia.report", &r, "Relink Report…");
+                    if r.clicked() {
+                        action = Some("report");
+                    }
+                }
                 for (id, label) in [("offlineAll", tl!("Offline All")), ("offline", tl!("Offline")), ("cancel", tl!("Cancel")), ("locate", tl!("Locate…"))] {
                     let r = ui.button(label);
                     push(&mut elems, format!("linkMedia.{id}"), &r, label);
@@ -307,7 +335,14 @@ fn link_media(app: &mut FilmcraftApp, ctx: &egui::Context) {
     }
     let (item, ..) = rows[d.row].clone();
     let relink = |app: &mut FilmcraftApp, d: &mut LinkMediaDraft, path: String| relink_to(app, d, &json!(item), path);
+    if let Some(i) = download {
+        match app.session.execute("media.downloadFromCloud", json!({"items": [i], "force": true})) {
+            Ok(_) => app.ui.status = tl!("Downloading from iCloud…").into(),
+            Err(e) => d.message = e.to_string(),
+        }
+    }
     match action {
+        Some("report") => app.ui.relink_report = true,
         Some("browse") => app.pick_ui(FileDialog::Folder { at: None }, |app, paths| {
             if let (Some(f), Some(d)) = (paths.into_iter().next(), app.ui.link_media.as_mut()) {
                 d.folder = f;
@@ -643,6 +678,149 @@ fn project_manager(app: &mut FilmcraftApp, ctx: &egui::Context) {
         }
     }
     app.ui.project_manager = (keep && !crate::widgets::escape_closes(ctx)).then_some(d);
+}
+
+/// Fill the candidates of `item` from the automatic search (once per item), selecting the best
+/// one that matches: the search found them, so the user only confirms.
+fn prefill(app: &FilmcraftApp, d: &mut LinkMediaDraft, item: u64) {
+    if d.prefilled == Some(item) || !d.candidates.is_empty() {
+        return;
+    }
+    d.prefilled = Some(item);
+    let Some(sugg) = app.session.offline.suggestions.get(&item) else { return };
+    d.candidates = sugg.iter().map(|c| (c.path.clone(), c.ok, c.identity_match, c.problems.join("; "))).collect();
+    d.candidate = d.candidates.iter().position(|c| c.1);
+    d.message = match d.candidates.iter().filter(|c| c.1).count() {
+        0 => tl!("Files with this name were found, but none matches every property of the clip.").into(),
+        1 => tl!("Found a matching file; check it, then Link.").into(),
+        n => tlf!("{n} different files match this clip; pick the right one, then Link.", n),
+    };
+}
+
+fn gb(b: u64) -> String {
+    format!("{:.1} GB", b as f64 / 1e9)
+}
+
+/// The iCloud downloads, with a Download button for one waiting for the user. Returns the item
+/// whose Download was clicked.
+fn downloads_list(ui: &mut egui::Ui, downloads: &[filmcraft_engine::relink_cloud::Download], elems: &mut Elems) -> Option<u64> {
+    use filmcraft_engine::relink_cloud::DlState;
+    let mut clicked = None;
+    ui.label(RichText::new(tl!("iCloud")).strong());
+    egui::Grid::new("link-media-downloads").num_columns(4).spacing([14.0, 4.0]).show(ui, |ui| {
+        for (k, x) in downloads.iter().enumerate() {
+            ui.label(&x.name);
+            ui.label(gb(x.size));
+            let state = match x.state {
+                DlState::Downloading => tlf!("Downloading… {m}:{s}", m = x.seconds / 60, s = format!("{:02}", x.seconds % 60)),
+                DlState::NeedsSpace => tlf!("Waiting: {why}", why = x.error.clone().unwrap_or_default()),
+                DlState::Failed => tlf!("Failed: {why}", why = x.error.clone().unwrap_or_default()),
+                DlState::Rejected => tl!("Downloaded, but not the clip's media").into(),
+                DlState::Done => tl!("Online").into(),
+            };
+            ui.label(state);
+            if matches!(x.state, DlState::NeedsSpace | DlState::Failed) {
+                let r = ui.button(tl!("Download"));
+                push(elems, format!("linkMedia.download.{k}"), &r, "Download");
+                if r.clicked() {
+                    clicked = Some(x.item);
+                }
+            } else {
+                ui.label("");
+            }
+            ui.end_row();
+        }
+    });
+    clicked
+}
+
+/// File ▸ Relink Report…: what the automatic relink linked and from where, what waits for the
+/// user, and the iCloud downloads; Undo Automatic Relink puts the links back.
+fn relink_report(app: &mut FilmcraftApp, ctx: &egui::Context) {
+    let Some(r) = app.session.offline.report.clone() else {
+        app.ui.relink_report = false;
+        app.ui.status = tl!("No automatic relink has run for this project.").into();
+        return;
+    };
+    let downloads = app.session.offline.downloads.clone();
+    let can_undo = !r.undone && !app.session.relink_auto.before.is_empty();
+    let mut elems: Elems = Vec::new();
+    let (mut keep, mut undo, mut link, mut download) = (true, false, false, None);
+    let width = (ctx.content_rect().width() - 40.0).clamp(1.0, 900.0);
+    egui::Window::new(tl!("Relink Report"))
+        .id(egui::Id::unique("Relink Report"))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(width)
+        .max_width(width)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(crate::widgets::dialog_center(ctx))
+        .show(ctx, |ui| {
+            ui.label(RichText::new(r.summary()).strong());
+            if r.undone {
+                ui.label(RichText::new(tl!("The automatic links were undone.")).weak());
+            }
+            if r.truncated {
+                ui.label(RichText::new(tl!("The search stopped at its limit; Link Media can search other folders.")).weak());
+            }
+            egui::ScrollArea::both().id_salt("relink-report-scroll").max_height((ctx.content_rect().height() * 0.5).max(80.0)).show(ui, |ui| {
+                if !r.linked.is_empty() {
+                    egui::Grid::new("relink-report-rows").num_columns(4).striped(true).spacing([14.0, 4.0]).show(ui, |ui| {
+                        for h in [tl!("Clip Name"), tl!("Linked To"), tl!("Found"), tl!("Matched On")] {
+                            ui.label(RichText::new(h).strong());
+                        }
+                        ui.end_row();
+                        for (k, row) in r.linked.iter().enumerate() {
+                            let l = ui.label(&row.name).on_hover_text(tlf!("Was: {from}", from = row.from));
+                            push(&mut elems, format!("relinkReport.row.{k}"), &l, row.name.clone());
+                            ui.label(RichText::new(&row.to).small());
+                            ui.label(crate::i18n::t(row.via.label()));
+                            ui.label(RichText::new(row.signals.join(", ")).small());
+                            ui.end_row();
+                        }
+                    });
+                }
+                if !downloads.is_empty() {
+                    ui.separator();
+                    download = downloads_list(ui, &downloads, &mut elems);
+                }
+            });
+            let waiting = r.need_you.len() + r.not_found.len();
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if waiting > 0 {
+                    let b = ui.button(tlf!("Link Media… ({n} need you)", n = waiting));
+                    push(&mut elems, "relinkReport.linkMedia", &b, "Link Media…");
+                    link = b.clicked();
+                }
+                let b = ui.add_enabled(can_undo, egui::Button::new(tl!("Undo Automatic Relink")));
+                push(&mut elems, "relinkReport.undo", &b, "Undo Automatic Relink");
+                undo = b.clicked();
+                let b = ui.button(tl!("Close"));
+                push(&mut elems, "relinkReport.close", &b, "Close");
+                keep &= !b.clicked();
+            });
+        });
+    for (id, rect, l) in elems {
+        app.auto.add(&id, rect, &l);
+    }
+    if let Some(i) = download
+        && let Err(e) = app.session.execute("media.downloadFromCloud", json!({"items": [i], "force": true}))
+    {
+        app.ui.status = e.to_string();
+    }
+    if undo {
+        match app.session.execute("media.undoAutoRelink", json!({})) {
+            Ok(v) => app.ui.status = tlf!("Put {n} clip(s) back offline", n = v["restored"].as_array().map_or(0, Vec::len)),
+            Err(e) => app.ui.status = e.to_string(),
+        }
+    }
+    if link {
+        app.session.offline.prompt = true;
+        app.ui.link_media = None;
+        keep = false;
+    }
+    app.ui.relink_report = keep && !crate::widgets::escape_closes(ctx);
 }
 
 /// Link Media: relink `item` to `path` with the dialog's matching options; the result goes into `d`.

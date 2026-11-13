@@ -37,6 +37,51 @@ impl FilmcraftApp {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
     }
 
+    /// Automatic relinking (`filmcraft_engine::relink_auto`): start the search a project asked
+    /// for when it opened, apply it when it is done (Link Media waits for it), finish iCloud
+    /// downloads as they land, and look for newly mounted drives every few seconds while media is
+    /// missing.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn tick_auto_relink(&mut self, ctx: &egui::Context, now: f64) {
+        use filmcraft_engine::relink_auto::AutoState;
+        if self.session.offline.auto == AutoState::Requested {
+            let n = self.session.offline.missing.len();
+            self.session.start_auto_relink();
+            if self.session.offline.auto == AutoState::Running && n > 0 {
+                self.status(tlf!("Looking for {n} missing media file(s)…", n));
+            }
+        }
+        if let Some(r) = self.session.poll_auto_relink() {
+            match r {
+                Ok(v) => {
+                    let quiet = v["quiet"].as_bool().unwrap_or(false);
+                    let busy = v["relinked"].as_array().is_some_and(|a| !a.is_empty()) || v["downloading"].as_array().is_some_and(|a| !a.is_empty());
+                    if busy && !quiet && !self.session.offline.prompt {
+                        self.ui.relink_report = true;
+                    }
+                    if let Some(summary) = v["summary"].as_str() {
+                        self.status(summary.to_string());
+                    }
+                }
+                Err(e) => self.status(e.to_string()),
+            }
+        }
+        for line in filmcraft_engine::relink_cloud::poll(&mut self.session) {
+            self.status(line);
+        }
+        let key = egui::Id::unique("autoRelink.lastVolumes");
+        let last: f64 = ctx.data(|d| d.get_temp(key)).unwrap_or(f64::NEG_INFINITY);
+        if now - last >= 5.0 {
+            ctx.data_mut(|d| d.insert_temp(key, now));
+            self.session.check_new_volumes();
+        }
+        if self.session.relink_auto.search.is_some() || !self.session.relink_auto.downloads.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        } else if !self.session.offline.missing.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_secs(5));
+        }
+    }
+
     /// Top-level UI pass: set the language, honor the injected panic test hook, lay out header, body and status bar, and dispatch the active mode.
     pub(super) fn frame(&mut self, ui: &mut egui::Ui) {
         i18n::set_current(self.ui.language);
