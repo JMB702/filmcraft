@@ -94,6 +94,9 @@ pub struct Parsed {
     fragment: filmcraft_interchange::Imported,
     report: filmcraft_interchange::Report,
     name: String,
+    /// Other paths the document stored for a media path that is missing (stored path, other
+    /// path): automatic relinking tries them.
+    alternates: Vec<(String, String)>,
 }
 
 fn options(path: &str) -> ImportOptions {
@@ -113,6 +116,7 @@ fn options(path: &str) -> ImportOptions {
 /// or OMF document.
 pub fn parse(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Result<Parsed> {
     let opts = options(path);
+    let mut alternates = Vec::new();
     let (fragment, report) = match format {
         // AAF / OMF may embed audio: write it next to the document (the media items point there)
         Format::Aaf | Format::Omf => {
@@ -140,9 +144,12 @@ pub fn parse(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Resul
                 if let Some(media) = fragment.project.item_mut(r.item).and_then(|item| item.as_media_mut())
                     && let MediaRef::File { path: stored } = &media.media
                     && s.services.file_size(stored).is_err()
-                    && s.services.file_size(&r.relative).is_ok()
                 {
-                    media.media = MediaRef::File { path: r.relative };
+                    if s.services.file_size(&r.relative).is_ok() {
+                        media.media = MediaRef::File { path: r.relative };
+                    } else {
+                        alternates.push((stored.clone(), r.relative));
+                    }
                 }
             }
             (fragment, report)
@@ -155,7 +162,7 @@ pub fn parse(s: &mut Session, path: &str, bytes: &[u8], format: Format) -> Resul
         }
     }
     let name = opts.name.unwrap_or_else(|| format.name().to_string());
-    Ok(Parsed { fragment, report, name })
+    Ok(Parsed { fragment, report, name, alternates })
 }
 
 /// Merge a read document into the project and link its media (see [`import`]).
@@ -165,7 +172,13 @@ pub fn merge(s: &mut Session, path: &str, format: Format, parsed: Parsed, bin: O
 
 /// [`merge`], spending at most `budget` opening the media files.
 pub(crate) fn merge_within(s: &mut Session, path: &str, format: Format, parsed: Parsed, bin: Option<BinId>, budget: std::time::Duration) -> Result<Value> {
-    let Parsed { fragment, report, name } = parsed;
+    let Parsed { fragment, report, name, alternates } = parsed;
+    for (stored, other) in alternates {
+        let list = s.offline.alternates.entry(stored).or_default();
+        if !list.contains(&other) {
+            list.push(other);
+        }
+    }
     let before: std::collections::HashSet<ItemId> = s.project.items.keys().copied().collect();
     let seqs = s.edit(&format!("Import {name}"), |proj, _| {
         let seqs = filmcraft_interchange::merge_into(proj, fragment, bin);

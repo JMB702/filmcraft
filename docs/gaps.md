@@ -390,3 +390,4 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | 2026-10-21 | minor | G10: PSD stills import the flattened composite, 8/16-bit grayscale and RGB (#2116) |
 | 2026-10-24 | minor | G8: dragging the cut on a transition's timeline in Effect Controls moves the cut, and the transition moves with it (#577) |
 | 2026-10-26 | minor | G13: optional GIF binary transparency, threshold and frame-disposal regression coverage (#3396); estimates unchanged |
+| 2026-11-13 | minor | No gap changed: automatic relink ships (missing media found in the background on open and after a move while open, linked only on a unique match of every signal, iCloud placeholders downloaded, Relink Report with undo). Still missing: byte-level iCloud progress (needs the platform crate) and file-system events instead of the 60 s / focus re-check |

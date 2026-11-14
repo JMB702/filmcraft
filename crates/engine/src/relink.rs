@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use filmcraft_media::MediaInfo;
-use filmcraft_project::{ItemId, ItemKind, MediaIdentity, MediaRef, Project};
+use filmcraft_project::{ItemId, ItemKind, MediaClip, MediaIdentity, MediaRef, Project};
 use filmcraft_render::offline::OfflineReason;
 use filmcraft_time::Tick;
 use serde::{Deserialize, Serialize};
@@ -72,8 +72,33 @@ pub struct OfflineState {
     /// Missing or offline items found by the last scan (by item id).
     pub missing: Vec<ItemId>,
     /// The frontend should show the Link Media dialog (set when a project opens with missing
-    /// media; cleared by relinking everything, Offline All or Cancel).
+    /// media; cleared by relinking everything, Offline All or Cancel). While an automatic search
+    /// runs ([`crate::relink_auto`]) the dialog waits for it.
     pub prompt: bool,
+    /// The automatic search ([`crate::relink_auto::AutoState`]).
+    #[serde(default)]
+    pub auto: crate::relink_auto::AutoState,
+    /// The document the project was opened from when it is not the project's own file (a
+    /// Premiere project): where the search starts.
+    #[serde(default)]
+    pub document: Option<String>,
+    /// Other paths an interchange document stored for a media path (Premiere's project-relative
+    /// path), by the path in use.
+    #[serde(default)]
+    pub alternates: BTreeMap<String, Vec<String>>,
+    /// Folder remaps learned from links made this session (old prefix, new prefix).
+    #[serde(default)]
+    pub remaps: Vec<(String, String)>,
+    /// Candidates for items the automatic search could not decide (by item id), best first:
+    /// Link Media lists them with the best one selected.
+    #[serde(default)]
+    pub suggestions: BTreeMap<u64, Vec<crate::relink_auto::Suggestion>>,
+    /// What the last automatic relink did.
+    #[serde(default)]
+    pub report: Option<crate::relink_auto::Report>,
+    /// Downloads from iCloud.
+    #[serde(default)]
+    pub downloads: Vec<crate::relink_cloud::Download>,
 }
 
 /// One missing / offline media item.
@@ -90,11 +115,11 @@ pub struct Missing {
     pub start_timecode: Option<i64>,
 }
 
-fn file_name(path: &str) -> &str {
+pub(crate) fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-fn split_ext(name: &str) -> (&str, &str) {
+pub(crate) fn split_ext(name: &str) -> (&str, &str) {
     match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], &name[i + 1..]),
         _ => (name, ""),
@@ -203,6 +228,12 @@ pub struct Candidate {
 pub fn check_candidate(s: &Session, item: ItemId, path: &str, o: &MatchOptions) -> Result<Candidate> {
     let it = s.project.item(item).ok_or_else(|| bad("media.relink", format!("no item {}", item.0)))?;
     let m = it.as_media().ok_or_else(|| bad("media.relink", format!("item {} is not media", item.0)))?;
+    check_media(m, &s.media, &*s.services, path, o)
+}
+
+/// [`check_candidate`] for a media clip held outside a session (the automatic search checks
+/// candidates on a worker thread, against a snapshot of the project).
+pub fn check_media(m: &MediaClip, pool: &MediaPool, services: &dyn Services, path: &str, o: &MatchOptions) -> Result<Candidate> {
     let old = match &m.media {
         MediaRef::File { path } => path.clone(),
         MediaRef::Generator(_) => return Err(bad("media.relink", "generated media has no file to link")),
@@ -218,7 +249,7 @@ pub fn check_candidate(s: &Session, item: ItemId, path: &str, o: &MatchOptions) 
     if o.extension && !ext_ok {
         c.problems.push(format!("extension differs (.{ne} vs .{oe})"));
     }
-    match identity_of(&*s.services, path) {
+    match identity_of(services, path) {
         Ok(id) => {
             c.identity = Some(id);
             if let Some(want) = m.identity {
@@ -239,11 +270,16 @@ pub fn check_candidate(s: &Session, item: ItemId, path: &str, o: &MatchOptions) 
         }
     }
     if c.problems.is_empty() {
-        match s.media.open_file(path, &*s.services) {
+        match pool.open_file(path, services) {
             Ok(src) => {
                 let info = src.info().clone();
                 let fd = m.info.frame_rate().frame_duration();
-                if o.duration && m.info.duration > Tick::ZERO && (info.duration - m.info.duration).0.abs() > fd.0 {
+                // what the project records minus the file's own; a project without a
+                // fingerprint got its duration from another app (Premiere counts the longest
+                // stream, audio running a few frames past the last picture)
+                let over = (m.info.duration - info.duration).0;
+                let slack = if m.identity.is_none() { fd.0.saturating_mul(DURATION_SLACK_FRAMES) } else { fd.0 };
+                if o.duration && m.info.duration > Tick::ZERO && !(over <= slack && over.saturating_neg() <= fd.0) {
                     c.problems.push(format!("duration differs ({:.3}s vs {:.3}s)", info.duration.seconds(), m.info.duration.seconds()));
                 }
                 if o.media_start && info.start_timecode != m.info.start_timecode {
@@ -251,7 +287,7 @@ pub fn check_candidate(s: &Session, item: ItemId, path: &str, o: &MatchOptions) 
                 }
                 if o.metadata {
                     if let (Some(a), Some(b)) = (&info.video, &m.info.video)
-                        && ((a.width, a.height) != (b.width, b.height) || a.frame_rate != b.frame_rate)
+                        && ((a.width, a.height) != (b.width, b.height) || !same_rate(a.frame_rate, b.frame_rate))
                     {
                         c.problems.push(format!(
                             "video differs ({}×{} {} vs {}×{} {})",
@@ -281,6 +317,18 @@ pub fn check_candidate(s: &Session, item: ItemId, path: &str, o: &MatchOptions) 
     c.ok = c.problems.is_empty();
     c.score = u32::from(c.identity_match == Some(true)) * 8 + u32::from(name_ok) * 4 + u32::from(ext_ok) * 2 + u32::from(c.ok);
     Ok(c)
+}
+
+/// Frames the duration a project without a fingerprint records may run past the file's: other
+/// apps count the longest stream (Premiere: audio a few frames past the last picture). Measured on
+/// real Premiere projects: 2 to 3 frames.
+pub const DURATION_SLACK_FRAMES: i64 = 4;
+
+/// Whether two frame rates are the same rate: equal within 0.01% (another app may store 29.97 as
+/// a fraction a few millionths off 30000/1001; 29.97 and 30 differ by 0.1%).
+pub fn same_rate(a: filmcraft_time::FrameRate, b: filmcraft_time::FrameRate) -> bool {
+    let (x, y) = (a.as_f64(), b.as_f64());
+    a == b || (x.is_finite() && y.is_finite() && y > 0.0 && ((x - y) / y).abs() < 1e-4)
 }
 
 /// The folder remap implied by a file moving from `old` to `new`: the longest common trailing
@@ -316,13 +364,13 @@ pub fn apply_remap(path: &str, from: &str, to: &str) -> Option<String> {
 }
 
 /// One planned relink: item → (new path, checked candidate).
-struct Plan {
-    item: ItemId,
-    cand: Candidate,
+pub(crate) struct Plan {
+    pub(crate) item: ItemId,
+    pub(crate) cand: Candidate,
 }
 
 /// Apply planned relinks as one undo step.
-fn apply(s: &mut Session, plans: Vec<Plan>, align_timecode: bool, label: &str) -> Result<Vec<Value>> {
+pub(crate) fn apply(s: &mut Session, plans: Vec<Plan>, align_timecode: bool, label: &str) -> Result<Vec<Value>> {
     let rows: Vec<Value> = plans.iter().map(|p| json!({"item": p.item.0, "path": p.cand.path})).collect();
     let sources: Vec<(ItemId, String, filmcraft_media::SharedSource)> =
         plans.iter().filter_map(|p| p.cand.source.clone().map(|src| (p.item, p.cand.path.clone(), src))).collect();
@@ -427,6 +475,12 @@ pub fn relink(s: &mut Session, p: &Value) -> Result<Value> {
         c.info = Some(src.info().clone());
         c.source = Some(src);
     }
+    if let Some(r) = derive_remap(&old, &path)
+        && !s.offline.remaps.contains(&r)
+    {
+        s.offline.remaps.push(r);
+    }
+    s.offline.suggestions.remove(&item.0);
     let mut plans = vec![Plan { item, cand: c }];
     if o.relink_others {
         plans.extend(others(s, item, &old, &path, &o));
@@ -732,6 +786,58 @@ pub fn commands() -> Vec<CommandSpec> {
             named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
+            id: "media.findAndLink",
+            label: "Find Missing Media Automatically",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"index":bool=true,"parentLevels":int=2,"timeLimit":seconds=30}  (search near the project, its media's folders, other drives and Spotlight; link only certain matches)"#,
+            enabled: always,
+            run: crate::relink_auto::find_and_link,
+            journal: true,
+            named: crate::commands::NamedKeys::NONE,
+        },
+        CommandSpec {
+            id: "media.undoAutoRelink",
+            label: "Undo Automatic Relink",
+            menu: &[],
+            shortcut: None,
+            params: "{}  (put the last automatic links back offline)",
+            enabled: |s| if s.relink_auto.before.is_empty() { Err("no automatic relink to undo".into()) } else { Ok(()) },
+            run: crate::relink_auto::undo_auto,
+            journal: true,
+            named: crate::commands::NamedKeys::NONE,
+        },
+        CommandSpec {
+            id: "media.relinkReport",
+            label: "Relink Report…",
+            menu: &["File"],
+            shortcut: None,
+            params: "{}  (what the last automatic relink did, the candidates waiting for you, and iCloud downloads)",
+            enabled: always,
+            run: |s, _| {
+                Ok(json!({
+                    "report": s.offline.report,
+                    "summary": s.offline.report.as_ref().map(crate::relink_auto::Report::summary),
+                    "suggestions": s.offline.suggestions,
+                    "downloads": s.offline.downloads,
+                    "searching": s.offline.auto != crate::relink_auto::AutoState::Idle,
+                }))
+            },
+            journal: false,
+            named: crate::commands::NamedKeys::NONE,
+        },
+        CommandSpec {
+            id: "media.downloadFromCloud",
+            label: "Download from iCloud",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"items":[id]?,"force":bool=false}  (download media stored in iCloud; they come online when they land)"#,
+            enabled: always,
+            run: crate::relink_cloud::download_cmd,
+            journal: false,
+            named: crate::commands::NamedKeys::NONE,
+        },
+        CommandSpec {
             id: "media.search",
             label: "Search for Media",
             menu: &[],
@@ -804,21 +910,51 @@ pub fn on_open(s: &mut Session) -> usize {
     // Items made offline on purpose (Make Offline / Offline All) don't ask again.
     let missing = list.iter().filter(|m| m.status == "missing").count();
     s.offline.prompt = missing > 0;
-    if missing > 0 {
-        s.toast(format!("{missing} media file(s) are missing; File > Link Media… reconnects them"));
-    }
     // cloud placeholders are not missing (relinking would not help): they wait for a download
     let in_cloud = not_downloaded(s).len();
-    if in_cloud > 0 {
-        s.toast(format!(
-            "{in_cloud} media file(s) are stored in iCloud and not downloaded, so they show offline; download them in Finder, then reopen the project"
-        ));
+    if s.prefs.media.auto_relink && !cfg!(target_arch = "wasm32") {
+        // the frontend searches (and downloads) in the background; Link Media waits for it
+        if missing + in_cloud > 0 {
+            s.offline.auto = crate::relink_auto::AutoState::Requested;
+        }
+        if missing > 0 {
+            s.toast(format!("{missing} media file(s) are missing; looking for them"));
+        }
+        if in_cloud > 0 {
+            s.toast(format!("{in_cloud} media file(s) are stored in iCloud; downloading them"));
+        }
+    } else {
+        if missing > 0 {
+            s.toast(format!("{missing} media file(s) are missing; File > Link Media… reconnects them"));
+        }
+        if in_cloud > 0 {
+            s.toast(format!(
+                "{in_cloud} media file(s) are stored in iCloud and not downloaded, so they show offline; download them in Finder, then reopen the project"
+            ));
+        }
     }
     list.len()
 }
 
-/// Media items the pool found to be cloud placeholders ([`OfflineReason::NotDownloaded`]), in
-/// item order.
+/// Media items whose file is a cloud placeholder, in item order: the ones the pool found to be
+/// ([`OfflineReason::NotDownloaded`]) and the ones the host says are (judged from metadata, so a
+/// project that has not drawn them yet knows too).
 pub fn not_downloaded(s: &Session) -> Vec<ItemId> {
-    s.project.items.keys().copied().filter(|&id| s.media.offline_status(id).is_some_and(|o| o.reason == OfflineReason::NotDownloaded)).collect()
+    s.project
+        .items
+        .values()
+        .filter(|it| {
+            if s.media.offline_status(it.id).is_some_and(|o| o.reason == OfflineReason::NotDownloaded) {
+                return true;
+            }
+            match it.as_media() {
+                Some(m) if !m.offline => match &m.media {
+                    MediaRef::File { path } => s.media.follow(path).is_ok_and(|f| s.services.is_cloud_placeholder(&f)),
+                    MediaRef::Generator(_) => false,
+                },
+                _ => false,
+            }
+        })
+        .map(|it| it.id)
+        .collect()
 }

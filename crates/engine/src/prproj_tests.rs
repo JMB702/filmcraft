@@ -158,10 +158,7 @@ fn media_stored_in_icloud_opens_offline_without_being_read() {
     assert_eq!(s.media.offline_status(shot).map(|o| o.reason), Some(OfflineReason::NotDownloaded));
     let st = s.execute("media.status", json!({"item": shot.0})).unwrap();
     assert_eq!(st[0]["status"], json!("notDownloaded"), "{st}");
-    assert!(
-        s.events.iter().any(|e| matches!(e, crate::Event::Toast { message, .. } if message.contains("stored in iCloud and not downloaded"))),
-        "the open says so"
-    );
+    assert!(s.events.iter().any(|e| matches!(e, crate::Event::Toast { message, .. } if message.contains("stored in iCloud"))), "the open says so");
     // its clips draw the not-downloaded slate
     let src = s.media.source_for(&s.project, shot, &*s.services).unwrap();
     let f = src.video_frame(filmcraft_media::FrameRequest { time: filmcraft_time::Tick(0), scale: 1.0 }).unwrap();

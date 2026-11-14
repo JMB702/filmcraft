@@ -151,6 +151,20 @@ pub fn is_cloud_placeholder(path: &std::path::Path) -> bool {
     }
 }
 
+/// Bring a cloud placeholder's contents onto this computer: reading a placeholder makes the
+/// system download the whole file first, so this blocks until it has (minutes for a large file;
+/// call it on a worker thread). A file that is already here returns at once.
+pub fn materialize(path: &std::path::Path) -> io::Result<()> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut byte = [0u8; 1];
+    let _ = f.read(&mut byte)?;
+    if is_cloud_placeholder(path) {
+        return Err(io::Error::other("the download from iCloud did not complete"));
+    }
+    Ok(())
+}
+
 /// Files [`FileReader`]s keep open at most, together (#67). Each open media source used to hold
 /// its own descriptor, so a project with hundreds of sources hit the soft descriptor limit (256 on
 /// macOS, 1024 on Linux) and the rest showed as failed or offline. Past this many, the least

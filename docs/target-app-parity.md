@@ -118,7 +118,7 @@ agent-hours to close the area to Premiere, sequential.
 | Graphics, titles, captions | 8% | ~85% | ~65% | 50–90 | Text engine with shaping and bidi, shapes, gradients (#514), our `.fcgt` templates (`.mogrt` refused by design), rolls / crawls, all caption formats. Arabic titles reported broken (#395); no 608/708 embedding in the video stream; speech-to-text off in release builds | |
 | Export and delivery | 8% | ~80% | ~65% | 60–110 | H.264 (own encoder), HEVC through hardware only, ProRes, DNxHR, APV, MXF OP1a / OP-Atom, image sequences, GIF, WAV / AIFF, presets, queue, GPU export rendering (#421). Missing: AV1, MPEG-2 / DVD / Blu-ray, DCP, JPEG 2000 / XS MXF, AS-10 / AS-11, XDCAM HD, EXR / DPX / Targa sequences, MP3, AAC-only audio, ProRes 4444 in the UI (#342), interlaced, smart render; bitrate target missed (#371) | [file-format-parity.md](file-format-parity.md) |
 | Project files and interchange | 8% | ~70% | ~45% | 90–160 | `.fcproj` with migrations, auto-save, recovery; FCP7 XML, FCPXML, AAF, OMF, EDL, OTIO, ALE. **Premiere's own `.prproj` cannot be opened** (the main beta blocker); AAF / OMF never validated in Media Composer / Pro Tools; XML import of a Premiere sequence took 97 s (#461) | [file-format-parity.md](file-format-parity.md) |
-| Preferences and project management | 4% | ~80% | ~65% | 20–40 | 16 Settings categories, most wired; Project Manager, proxies, Link Media; Media Manager limits (#411); images as proxies (#451) | |
+| Preferences and project management | 4% | ~80% | ~65% | 20–40 | 16 Settings categories, most wired; Project Manager, proxies, Link Media; automatic relink on open (background search, fingerprint or name + duration + metadata with no rival, iCloud downloads, Relink Report with undo); Media Manager limits (#411); images as proxies (#451) | |
 | **Features, weighted** | 100% | **~86%** | **~64%** | **740–1,290** | | |
 
 ## By dimension
@@ -219,7 +219,7 @@ full-area depth (e.g. the ~20 common effects rather than all 93 and their approx
 | Audio (levels, Essential Sound, loudness, ducking) | 11% | 75% | Complete; audio-device reports off macOS |
 | Titles and captions | 7% | 75% | Text, shapes, templates, SRT / SCC / VTT; `.mogrt` not read by design |
 | Export with presets | 9% | 75% | H.264, HEVC (hardware), ProRes, DNxHR, presets, queue; bitrate miss (#371) |
-| Save, reopen, auto-save, relink, proxies | 4% | 80% | Atomic saves, migrations, recovery, Link Media |
+| Save, reopen, auto-save, relink, proxies | 4% | 80% | Atomic saves, migrations, recovery, Link Media; missing media is found and linked automatically on open and when a file moves while open, iCloud placeholders are downloaded; ambiguous matches go to Link Media pre-filled; no byte-level iCloud progress yet |
 | Playback speed on their machine | 9% | 65% | 4K H.264 / HEVC real time with hardware decode on macOS; lag / CPU reports (#523, #525) |
 | **Weighted depth** | 100% | **74.8%** | |
 

@@ -282,6 +282,8 @@ impl FilmcraftApp {
         updates_ui::tick(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_media_refresh(ctx, now);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.tick_auto_relink(ctx, now);
     }
 
     /// Apply engine events that change the active sequence/view, IME target, toast or project.

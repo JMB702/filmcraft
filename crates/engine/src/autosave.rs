@@ -261,6 +261,9 @@ pub struct MediaPrefs {
     pub auto_hide_dependent_clips: bool,
     pub import_image_sequences: bool,
     pub refresh_growing_files: bool,
+    /// Find missing media automatically when a project opens (or a drive mounts) and link the
+    /// files that certainly match; download media stored in iCloud (`crate::relink_auto`).
+    pub auto_relink: bool,
     pub resume_growing_playback: bool,
     pub growing_refresh_seconds: u32,
     pub hardware_decoding: bool,
@@ -285,6 +288,7 @@ impl Default for MediaPrefs {
             auto_hide_dependent_clips: false,
             import_image_sequences: false,
             refresh_growing_files: true,
+            auto_relink: true,
             resume_growing_playback: false,
             growing_refresh_seconds: 60,
             hardware_decoding: true,
