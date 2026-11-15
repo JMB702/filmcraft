@@ -136,3 +136,47 @@ fn ok_keeps_a_duration_that_was_not_edited() {
         assert_eq!((m.name.as_str(), m.duration), ("Renamed", want), "only the name changed");
     }
 }
+
+impl Driver {
+    fn element_label(&mut self, id: &str) -> Option<String> {
+        let v = self.ok("ui.elements", json!({"prefix": id}));
+        v.as_array()?.iter().find(|e| e["id"] == id).and_then(|e| e["label"].as_str()).map(str::to_string)
+    }
+
+    fn right_click_marker(&mut self, marker: u64) {
+        let id = format!("timeline.marker.{marker}");
+        let elements = self.ok("ui.elements", json!({"prefix": id}));
+        let rect = elements.as_array().unwrap().iter().find(|e| e["id"] == id).unwrap()["rect"].as_array().unwrap().clone();
+        let x = rect[0].as_f64().unwrap() + rect[2].as_f64().unwrap() / 2.0;
+        let y = rect[1].as_f64().unwrap() + rect[3].as_f64().unwrap() / 2.0;
+        self.ok("ui.click", json!({"x": x, "y": y, "button": "right"}));
+        self.frames(3);
+    }
+}
+
+/// The ruler's marker menu opens with the marker's title and comment above the actions.
+#[test]
+fn marker_menu_shows_the_title_and_comment() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"focused": "Timeline"}));
+    let id = d.exec("markers.add", json!({"time": filmcraft_time::Tick::from_seconds_f64(2.0).0, "name": "Beat", "comment": "cut on the downbeat"}))["marker"]
+        .as_u64()
+        .unwrap();
+    d.frames(4);
+    d.right_click_marker(id);
+    assert_eq!(d.element_label("timeline.markerMenu.title").as_deref(), Some("Beat"));
+    assert_eq!(d.element_label("timeline.markerMenu.comment").as_deref(), Some("cut on the downbeat"));
+    assert!(d.has_element("timeline.markerMenu.markers.edit"), "the actions follow the header");
+}
+
+/// A marker without a name is titled "Marker", and one without a comment shows no comment line.
+#[test]
+fn marker_menu_title_falls_back_and_skips_an_empty_comment() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"focused": "Timeline"}));
+    let id = d.exec("markers.add", json!({"time": filmcraft_time::Tick::from_seconds_f64(2.0).0}))["marker"].as_u64().unwrap();
+    d.frames(4);
+    d.right_click_marker(id);
+    assert_eq!(d.element_label("timeline.markerMenu.title").as_deref(), Some("Marker"));
+    assert!(!d.has_element("timeline.markerMenu.comment"));
+}

@@ -1026,6 +1026,7 @@ fn mini_timeline(
                     &response,
                     &marker.name,
                 );
+                let response = response.on_hover_ui(|ui| super::markers_panel::marker_tooltip(ui, marker));
                 if response.clicked() {
                     marker_seek = Some(marker.start);
                 }
