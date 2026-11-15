@@ -26,6 +26,8 @@ filmcraft-time = { workspace = true }
 filmcraft-gpu = { workspace = true }
 filmcraft-ui-egui = { workspace = true }
 filmcraft-platform = { workspace = true }
+# The live channel's announcements (src/live.rs), shared with filmcraft-cli.
+filmcraft-automation = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard", "wayland", "x11"] }
 serde_json = { workspace = true }
@@ -46,6 +48,7 @@ pollster = "1"
 
 [dev-dependencies]
 glob = "0.3"
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.21"

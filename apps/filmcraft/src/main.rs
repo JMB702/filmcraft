@@ -7,7 +7,10 @@
 //! Without a project, `--demo` or `--empty`, Settings ▸ General ▸ At Startup decides: Show Home
 //! (the demo project), Open Most Recent, or an empty project.
 //!
-//! `--control <port>` (or `FILMCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server;
+//! Every start serves the live channel (a private Unix socket announced in the user's FilmCraft
+//! folder, see [`live`]), so `filmcraft-cli --project P …` edits P here while it is open;
+//! `--no-live` or `FILMCRAFT_LIVE=0` turns it off.
+//! `--control <port>` (or `FILMCRAFT_CONTROL_PORT`) also starts a localhost JSON-lines control server;
 //! `FILMCRAFT_CONTROL_TOKEN` is required (see `docs/control-protocol.md`).
 //! see `filmcraft_ui_egui::control` for the methods. A port that is not a number is an error from
 //! either source.
@@ -33,6 +36,7 @@ mod control_server;
 mod dev_icon;
 mod file_filters;
 mod graphics;
+mod live;
 mod logging;
 #[cfg(target_os = "macos")]
 mod native_color;
@@ -305,17 +309,34 @@ fn native_options(agent: bool) -> eframe::NativeOptions {
 /// Creates the app once eframe has its window and graphics device; sets `created` when it runs,
 /// and confirms the graphics mode once two frames have painted.
 fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<AtomicBool>) -> eframe::AppCreator<'static> {
-    let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _ } = launch;
+    let Launch { control_port, control_input_only, live, files, demo, startup_flag, recover, data_dir, graphics: _ } = launch;
     Box::new(move |cc| {
         filmcraft_ui_egui::install_ime_reset_callbacks(&cc.egui_ctx);
         created.store(true, Ordering::Relaxed);
         // Start the control server before anything touches recovery state: `file.recover`
         // consumes its candidate, and an input-only session that must abort (no server) may not
         // take that step first, or the recovered work is lost (#3436).
-        let control = control_port.map(|port| control_server::start(port, cc.egui_ctx.clone()));
-        if control_input_only && let Some((_, _, Some(why))) = &control {
+        // `--control` and the live channel feed one queue; requests are rejected (retryably)
+        // until the app drains it.
+        let (control_tx, control_rx) = std::sync::mpsc::channel::<filmcraft_ui_egui::ControlRequest>();
+        let control_ready = Arc::new(AtomicBool::new(false));
+        let control = control_port.map(|port| {
+            let token = std::env::var("FILMCRAFT_CONTROL_TOKEN").ok();
+            control_server::start_tcp(port, cc.egui_ctx.clone(), token, control_tx.clone(), Arc::clone(&control_ready))
+        });
+        if control_input_only && let Some(Some(why)) = &control {
             return Err(Box::new(control_server::ControlServerRequired(why.reason())));
         }
+        let live = (live && !filmcraft_automation::live::disabled_by_env(std::env::var(filmcraft_automation::live::SWITCH_ENV).ok().as_deref()))
+            .then(|| match live::start(cc.egui_ctx.clone(), control_tx.clone(), Arc::clone(&control_ready)) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    log::warn!("live channel off: {e}");
+                    None
+                }
+            })
+            .flatten();
+        drop(control_tx);
         // A fallback graphics mode says so in the window, with a button back to the default.
         let notice = graphics.degraded().then(|| {
             let start = graphics.clone();
@@ -475,16 +496,21 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             app.hooks.menu_changed = Some(update);
             app.ui.show_menu_bar = false;
         }
-        if let Some((rx, ready, disabled)) = control {
-            app = if control_input_only { app.with_control_input_only(rx) } else { app.with_control(rx) };
+        if control.is_some() || live.is_some() {
+            app = if control_input_only { app.with_control_input_only(control_rx) } else { app.with_control(control_rx) };
             // The token cause is shown in the app as a fully translated sentence (the English
             // `reason()` stays for the log and the input-only error); a bind failure stays in the
             // log for now — port-collision reporting is #3318's rework.
-            if let Some(control_server::DisabledWhy::Token) = &disabled {
+            if let Some(Some(control_server::DisabledWhy::Token)) = &control {
                 app = app.with_control_notice(filmcraft_ui_egui::ControlNotice::Token);
             }
             // From here the app drains the queue on its first pass: stop rejecting requests.
-            ready.store(true, Ordering::Relaxed);
+            control_ready.store(true, Ordering::Relaxed);
+        }
+        // The announcement names the open project; it goes (and its files with it) with the app.
+        if let Some(mut live) = live {
+            live.set_project(app.session.path.as_deref());
+            app.hooks.project_path_changed = Some(Box::new(move |path| live.set_project(path)));
         }
         Ok(Box::new(app))
     })

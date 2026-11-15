@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
@@ -16,10 +16,20 @@ const JOB_POLL: Duration = Duration::from_millis(250);
 /// Idle connections kept for reuse; the app serves at most 16 at once.
 const MAX_IDLE: usize = 4;
 
-type Conn = (BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf);
+type Conn = (BufReader<Box<dyn AsyncRead + Unpin + Send>>, Box<dyn AsyncWrite + Unpin + Send>);
+
+/// Where the app listens.
+#[derive(Clone, Debug)]
+enum Target {
+    /// `--control <port>`: loopback TCP.
+    Tcp(String),
+    /// The live channel of a normally started app ([`crate::live`]).
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
+}
 
 pub struct BridgeClient {
-    addr: String,
+    addr: Target,
     /// Inherited from the same owner-controlled environment as the desktop app.
     token: Option<String>,
     /// Connections with no request in flight. A request takes one (or opens one) for its whole
@@ -38,7 +48,13 @@ impl BridgeClient {
         if !matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
             return Err(AutomationError::BadRequest(format!("bridge address must be loopback, got `{addr}`")));
         }
-        Ok(Self { addr, token: std::env::var("FILMCRAFT_CONTROL_TOKEN").ok(), idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) })
+        Ok(Self { addr: Target::Tcp(addr), token: std::env::var("FILMCRAFT_CONTROL_TOKEN").ok(), idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) })
+    }
+
+    /// The live channel of a running app, from its announcement ([`crate::live::running`]).
+    #[cfg(unix)]
+    pub fn live(a: &crate::live::Announcement) -> Self {
+        Self { addr: Target::Unix(a.socket.clone()), token: Some(a.token.clone()), idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) }
     }
 
     /// Run engine command `id` in the app. A blocking export (`file.exportMedia` with
@@ -120,15 +136,27 @@ impl BridgeClient {
     }
 
     async fn connect(&self) -> Result<Conn, AutomationError> {
-        let s = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&self.addr))
-            .await
-            .map_err(|_| AutomationError::Bridge(format!("timed out connecting to {}", self.addr)))?
-            .map_err(|e| AutomationError::Bridge(format!(
-                "cannot connect to {} ({e}); start the app with `filmcraft --control <port>` and set FILMCRAFT_CONTROL_TOKEN to the same 64-hex-character value on both sides (see docs/control-protocol.md)",
-                self.addr
-            )))?;
-        let (r, w) = s.into_split();
-        Ok((BufReader::new(r), w))
+        match &self.addr {
+            Target::Tcp(addr) => {
+                let s = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
+                    .await
+                    .map_err(|_| AutomationError::Bridge(format!("timed out connecting to {addr}")))?
+                    .map_err(|e| AutomationError::Bridge(format!(
+                        "cannot connect to {addr} ({e}); start the app with `filmcraft --control <port>` and set FILMCRAFT_CONTROL_TOKEN to the same 64-hex-character value on both sides (see docs/control-protocol.md)"
+                    )))?;
+                let (r, w) = s.into_split();
+                Ok((BufReader::new(Box::new(r)), Box::new(w)))
+            }
+            #[cfg(unix)]
+            Target::Unix(path) => {
+                let s = tokio::time::timeout(Duration::from_secs(5), tokio::net::UnixStream::connect(path))
+                    .await
+                    .map_err(|_| AutomationError::Bridge(format!("timed out connecting to {}", path.display())))?
+                    .map_err(|e| AutomationError::Bridge(format!("cannot connect to the running app at {} ({e}); did it quit?", path.display())))?;
+                let (r, w) = s.into_split();
+                Ok((BufReader::new(Box::new(r)), Box::new(w)))
+            }
+        }
     }
 }
 

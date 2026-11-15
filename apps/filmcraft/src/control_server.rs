@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use filmcraft_ui_egui::ControlRequest;
@@ -61,22 +61,30 @@ impl DisabledWhy {
     }
 }
 
-/// Start the server for `--control`. Returns the request queue, a flag the app sets once it can
-/// answer requests (until then they are rejected with a retryable error), and — when the server
-/// is *not* running — why (#3436), for the log and (for a bad token) the status bar.
-pub fn start(port: u16, ctx: egui::Context) -> (Receiver<ControlRequest>, Arc<AtomicBool>, Option<DisabledWhy>) {
-    start_with_token(port, ctx, std::env::var("FILMCRAFT_CONTROL_TOKEN").ok())
+/// Start the server for `--control` with its own queue (tests). Returns the request queue, a
+/// flag the app sets once it can answer requests (until then they are rejected with a retryable
+/// error), and — when the server is *not* running — why (#3436).
+#[cfg(test)]
+fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> (std::sync::mpsc::Receiver<ControlRequest>, Arc<AtomicBool>, Option<DisabledWhy>) {
+    let (tx, rx) = std::sync::mpsc::channel::<ControlRequest>();
+    let ready = Arc::new(AtomicBool::new(false));
+    let why = start_tcp(port, ctx, token, tx, Arc::clone(&ready));
+    if why.is_some() {
+        ready.store(true, Ordering::Relaxed);
+    }
+    (rx, ready, why)
 }
 
-fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> (Receiver<ControlRequest>, Arc<AtomicBool>, Option<DisabledWhy>) {
-    let (tx, rx) = channel::<ControlRequest>();
+/// Start the `--control` server feeding `tx` (shared with the live channel, [`crate::live`]).
+/// `ready` is set by the app once it drains the queue. Returns why it is *not* running, if so.
+pub fn start_tcp(port: u16, ctx: egui::Context, token: Option<String>, tx: Sender<ControlRequest>, ready: Arc<AtomicBool>) -> Option<DisabledWhy> {
     // An inherited environment variable shares the credential with the owner's bridge process
     // without exposing it in command-line arguments, logs, or a shared discovery file.
     let Some(token) = token.filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())) else {
         // The reason goes to the log (a desktop launch has no stderr to read; #3436) and back to
         // the app, which shows it in the status bar.
         log::warn!("control server disabled: {}", DisabledWhy::Token.reason());
-        return (rx, Arc::new(AtomicBool::new(true)), Some(DisabledWhy::Token));
+        return Some(DisabledWhy::Token);
     };
     match TcpListener::bind(("127.0.0.1", port)) {
         Ok(listener) => {
@@ -84,22 +92,85 @@ fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> (Re
             // Requests that arrive before the app can answer them are rejected with a retryable
             // error instead of queued: a queued request outlives its 60 s reply wait, and a
             // client retry would then apply the same mutation twice (#3436).
-            let ready = Arc::new(AtomicBool::new(false));
-            let loop_ready = Arc::clone(&ready);
-            std::thread::spawn(move || accept_loop(listener, tx, ctx, token, loop_ready));
-            (rx, ready, None)
+            spawn_accept_loop(listener, tx, ctx, token, ready);
+            None
         }
         Err(error) => {
             let why = DisabledWhy::Bind { port, error: error.to_string() };
             log::warn!("control server disabled: {}", why.reason());
-            (rx, Arc::new(AtomicBool::new(true)), Some(why))
+            Some(why)
         }
     }
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String, ready: Arc<AtomicBool>) {
+/// Serve `listener` on a thread of its own.
+pub(crate) fn spawn_accept_loop<L: Listener>(listener: L, tx: Sender<ControlRequest>, ctx: egui::Context, token: String, ready: Arc<AtomicBool>) {
+    let spawned = std::thread::Builder::new().name("control-accept".into()).spawn(move || accept_loop(listener, tx, ctx, token, ready));
+    if let Err(e) = spawned {
+        log::warn!("control server could not start its thread: {e}");
+    }
+}
+
+/// A connected peer: TCP for `--control`, a Unix domain socket for the live channel.
+pub(crate) trait Stream: Read + Write + Send + Sized + 'static {
+    fn set_timeouts(&self, timeout: Duration) -> std::io::Result<()>;
+    fn try_clone_stream(&self) -> std::io::Result<Self>;
+}
+
+impl Stream for TcpStream {
+    fn set_timeouts(&self, timeout: Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(timeout))?;
+        self.set_write_timeout(Some(timeout))
+    }
+    fn try_clone_stream(&self) -> std::io::Result<Self> {
+        self.try_clone()
+    }
+}
+
+#[cfg(unix)]
+impl Stream for std::os::unix::net::UnixStream {
+    fn set_timeouts(&self, timeout: Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(timeout))?;
+        self.set_write_timeout(Some(timeout))
+    }
+    fn try_clone_stream(&self) -> std::io::Result<Self> {
+        self.try_clone()
+    }
+}
+
+/// Something that accepts [`Stream`]s.
+pub(crate) trait Listener: Send + 'static {
+    type Conn: Stream;
+    fn accept_one(&self) -> std::io::Result<Self::Conn>;
+}
+
+impl Listener for TcpListener {
+    type Conn = TcpStream;
+    fn accept_one(&self) -> std::io::Result<TcpStream> {
+        self.accept().map(|(s, _)| s)
+    }
+}
+
+#[cfg(unix)]
+impl Listener for std::os::unix::net::UnixListener {
+    type Conn = std::os::unix::net::UnixStream;
+    fn accept_one(&self) -> std::io::Result<Self::Conn> {
+        self.accept().map(|(s, _)| s)
+    }
+}
+
+fn accept_loop<L: Listener>(listener: L, tx: Sender<ControlRequest>, ctx: egui::Context, token: String, ready: Arc<AtomicBool>) {
     let open = Arc::new(AtomicUsize::new(0));
-    for mut stream in listener.incoming().flatten() {
+    loop {
+        let mut stream = match listener.accept_one() {
+            Ok(s) => s,
+            Err(e) => {
+                // out of file descriptors and the like: try again shortly instead of spinning
+                log::debug!("control server: accept failed: {e}");
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+        };
         if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
             open.fetch_sub(1, Ordering::SeqCst);
             let _ = writeln!(stream, "{}", json!({"ok": false, "error": "too many control connections"}));
@@ -131,23 +202,22 @@ impl Drop for Slot {
     }
 }
 
-fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: &str, ready: Arc<AtomicBool>) {
+fn serve<S: Stream>(stream: S, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: &str, ready: Arc<AtomicBool>) {
     if let Err(e) = serve_with_timeout(stream, tx, ctx, token, CONNECTION_TIMEOUT, ready) {
         log::warn!("could not configure control connection: {e}");
     }
 }
 
-fn serve_with_timeout(
-    stream: TcpStream,
+fn serve_with_timeout<S: Stream>(
+    stream: S,
     tx: &Sender<ControlRequest>,
     ctx: &egui::Context,
     token: &str,
     timeout: Duration,
     ready: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    let read = stream.try_clone()?;
+    stream.set_timeouts(timeout)?;
+    let read = stream.try_clone_stream()?;
     serve_lines(read, stream, token, |method, params| {
         // Until the app can drain the queue, a request would outlive its 60 s reply wait and
         // still run after startup: reject it instead, so a client retry is the only copy (#3436).

@@ -13,6 +13,9 @@ Options:
                      64 random hex characters; see docs/control-protocol.md)
   --control-input-only  accept widget input only from the control server
                      (requires --control or FILMCRAFT_CONTROL_PORT)
+  --no-live          don't serve the live channel that lets filmcraft-cli
+                     edit the open project (also: FILMCRAFT_LIVE=0; it is
+                     private to your user account, see docs/control-protocol.md)
   --demo             open the demo project
   --empty            start with an empty project
   --recover          recover the newest unsaved changes without asking
@@ -40,6 +43,8 @@ pub enum Cli {
 pub struct Launch {
     pub control_port: Option<u16>,
     pub control_input_only: bool,
+    /// Serve the live channel (a private Unix socket, `crate::live`); `--no-live` turns it off.
+    pub live: bool,
     /// A project and / or media files to open.
     pub files: Vec<String>,
     pub demo: bool,
@@ -66,6 +71,7 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
     let mut l = Launch {
         control_port: None,
         control_input_only: false,
+        live: true,
         files: Vec::new(),
         demo: true,
         startup_flag: false,
@@ -87,6 +93,7 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
             }
             "--demo" => (l.demo, l.startup_flag) = (true, true),
             "--control-input-only" => l.control_input_only = true,
+            "--no-live" => l.live = false,
             "--empty" => (l.demo, l.startup_flag) = (false, true),
             "--recover" => l.recover = Some(true),
             "--no-recover" => l.recover = Some(false),
@@ -182,7 +189,7 @@ mod tests {
         assert_eq!(parse_args(&["--version"]), Ok(Cli::Version));
         assert_eq!(parse_args(&["--version", "--help"]), Ok(Cli::Help));
         assert_eq!(parse_args(&["a.mp4", "--version"]), Ok(Cli::Version));
-        for flag in ["--control", "--demo", "--empty", "--recover", "--no-recover", "--data-dir", "--version", "--help"] {
+        for flag in ["--control", "--no-live", "--demo", "--empty", "--recover", "--no-recover", "--data-dir", "--version", "--help"] {
             assert!(USAGE.contains(flag), "usage lists {flag}");
         }
     }
@@ -232,6 +239,7 @@ mod tests {
             Launch {
                 control_port: None,
                 control_input_only: false,
+                live: true,
                 files: vec![],
                 demo: true,
                 startup_flag: false,
@@ -242,6 +250,8 @@ mod tests {
         );
         let l = launch(&["--control", "9876", "--empty", "--no-recover", "--data-dir", "/tmp/fc", "cut.fcproj", "a.mp4"]);
         assert_eq!(l.control_port, Some(9876));
+        assert!(l.live, "live by default, --control or not");
+        assert!(!launch(&["--no-live"]).live);
         assert_eq!((l.demo, l.startup_flag, l.recover), (false, true, Some(false)));
         assert_eq!(l.data_dir, Some(std::path::PathBuf::from("/tmp/fc")));
         assert_eq!(l.files, ["cut.fcproj", "a.mp4"]);
