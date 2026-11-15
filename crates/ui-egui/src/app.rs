@@ -288,6 +288,10 @@ impl FilmcraftApp {
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_auto_relink(ctx, now);
         self.tick_project_path();
+        let opened = self.hooks.opened_documents.as_mut().map(|take| take()).unwrap_or_default();
+        if !opened.is_empty() {
+            self.open_documents(ctx, opened);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_disk_watch(ctx, now);
     }

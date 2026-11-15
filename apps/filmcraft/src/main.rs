@@ -167,6 +167,20 @@ fn main() -> eframe::Result {
     if graphics.mode() == graphics::Mode::Default {
         register_gpu_frame_renderer();
     }
+    // macOS hands the files a launch (or a later Finder double-click, `open -a`) should open to
+    // an "open documents" event, not to the command line. Listen before the event loop starts:
+    // the event that launched the app comes during its start-up. `_documents_open` keeps the
+    // handler installed until the loop has ended.
+    #[cfg(target_os = "macos")]
+    let (_documents_open, documents) = match filmcraft_platform::open_documents::listen() {
+        Ok((listening, documents)) => (Some(listening), Some(std::rc::Rc::new(documents))),
+        Err(e) => {
+            log::warn!("files opened from Finder are not received: {e}");
+            (None, None)
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let documents: Option<std::rc::Rc<filmcraft_platform::open_documents::OpenDocuments>> = None;
     // A panic in a FilmCraft started again for it saved the next mode for the next launch.
     let mut next_saved = false;
     let started = loop {
@@ -174,7 +188,7 @@ fn main() -> eframe::Result {
         // Before eframe creates the wgpu instance (e.g. no OpenGL on Windows, see graphics.rs).
         graphics::apply(&mut options, graphics.mode(), backend_override);
         let app_created = Arc::new(AtomicBool::new(false));
-        let creator = app_creator(launch.clone(), graphics.clone(), Arc::clone(&app_created));
+        let creator = app_creator(launch.clone(), graphics.clone(), Arc::clone(&app_created), documents.clone());
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| eframe::run_native("FilmCraft", options, creator)));
         let app_created = app_created.load(Ordering::Relaxed);
         let result = match run {
@@ -243,6 +257,13 @@ fn main() -> eframe::Result {
     started
 }
 
+/// The files a launch opens: the command line's, else those the system sent with the launch
+/// (macOS open-documents event). Files sent with a launch that also had command-line files are
+/// left for the running app, which asks first if that would replace a project.
+fn launch_files(files: Vec<String>, sent: impl FnOnce() -> Vec<std::path::PathBuf>) -> Vec<String> {
+    if files.is_empty() { sent().into_iter().map(|p| p.to_string_lossy().into_owned()).collect() } else { files }
+}
+
 /// Set for a FilmCraft started again after its graphics panicked (#2553), so that one does not
 /// start a third.
 const RELAUNCHED: &str = "FILMCRAFT_GRAPHICS_RELAUNCHED";
@@ -308,9 +329,17 @@ fn native_options(agent: bool) -> eframe::NativeOptions {
 
 /// Creates the app once eframe has its window and graphics device; sets `created` when it runs,
 /// and confirms the graphics mode once two frames have painted.
-fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<AtomicBool>) -> eframe::AppCreator<'static> {
+fn app_creator(
+    launch: Launch,
+    graphics: graphics::GraphicsStart,
+    created: Arc<AtomicBool>,
+    documents: Option<std::rc::Rc<filmcraft_platform::open_documents::OpenDocuments>>,
+) -> eframe::AppCreator<'static> {
     let Launch { control_port, control_input_only, live, files, demo, startup_flag, recover, data_dir, graphics: _ } = launch;
     Box::new(move |cc| {
+        // Launched by the system to open files (Finder, `open -a`): they arrived during start-up,
+        // before this window, and open as command-line files would.
+        let files = launch_files(files, || documents.as_deref().map(|d| d.take()).unwrap_or_default());
         filmcraft_ui_egui::install_ime_reset_callbacks(&cc.egui_ctx);
         created.store(true, Ordering::Relaxed);
         // Start the control server before anything touches recovery state: `file.recover`
@@ -457,6 +486,13 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             app.hooks.run_dialog = Some(Box::new(run_dialog_off_thread));
         }
         app.hooks.open_path = Some(Box::new(open_path));
+        // Files the system asks to open while FilmCraft runs: a project goes through the usual
+        // unsaved-changes question, other files are imported (see `FilmcraftApp::open_documents`).
+        if let Some(documents) = documents {
+            let ctx = cc.egui_ctx.clone();
+            documents.on_arrival(move || ctx.request_repaint());
+            app.hooks.opened_documents = Some(Box::new(move || documents.take()));
+        }
         // Help menu, About and Discord links (#642): eframe is built without its `links`
         // feature, so `ctx.open_url` does nothing on the desktop. Detached, so a launcher
         // that waits for the browser never freezes the UI.
@@ -711,6 +747,17 @@ fn project_patterns() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A launch opens the command line's files; without any, the files macOS sent with the launch
+    /// (Finder, `open -a`), which otherwise reach the app later through its unsaved-changes path.
+    #[test]
+    fn a_launch_opens_the_files_the_system_sent_when_the_command_line_has_none() {
+        use std::path::PathBuf;
+        let sent = || vec![PathBuf::from("/Films/Cut.fcproj"), PathBuf::from("/Films/a clip.mov")];
+        assert_eq!(super::launch_files(Vec::new(), sent), ["/Films/Cut.fcproj", "/Films/a clip.mov"]);
+        assert_eq!(super::launch_files(vec!["x.fcproj".into()], || panic!("left for the running app")), ["x.fcproj"]);
+        assert!(super::launch_files(Vec::new(), Vec::new).is_empty());
+    }
+
     /// The new start after a graphics panic keeps the arguments and picks the next mode, replacing a
     /// `--graphics` that was given (#2558).
     #[test]

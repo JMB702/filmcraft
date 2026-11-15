@@ -897,3 +897,51 @@ fn a_dropped_project_file_opens_and_asks_about_unsaved_changes() {
     d.click("openProject.dontSave");
     assert!(d.path().is_some_and(|p| p.ends_with("B.FCPROJ")));
 }
+
+/// macOS: a project opened from Finder (or `open -a`) while FilmCraft runs arrives through the
+/// `opened_documents` hook and goes through the same unsaved-changes question as File ▸ Open;
+/// other files are imported, a file that is gone is skipped.
+#[test]
+fn a_project_opened_from_finder_asks_about_unsaved_changes() {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let (a, b) = (dir.join("A.fcproj"), dir.join("B.fcproj"));
+    let mut d = Driver::new();
+    d.exec("file.saveCopy", json!({"path": b.to_string_lossy()}));
+    d.exec("file.saveAs", json!({"path": a.to_string_lossy()}));
+    let a_path = d.path().expect("saved as A");
+    let sent = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+    let queue = Rc::clone(&sent);
+    d.app().hooks.opened_documents = Some(Box::new(move || std::mem::take(&mut *queue.borrow_mut())));
+
+    d.edit();
+    sent.borrow_mut().push(b.clone());
+    d.frames(3);
+    assert!(d.has("openProject.save") && d.has("openProject.dontSave") && d.has("openProject.cancel"));
+    d.click("openProject.cancel");
+    assert_eq!(d.path().as_deref(), Some(a_path.as_str()), "still the first project");
+    assert!(d.app().session.is_dirty(), "its changes are kept");
+
+    sent.borrow_mut().push(b.clone());
+    d.frames(3);
+    d.click("openProject.dontSave");
+    assert!(d.path().is_some_and(|p| p.ends_with("B.fcproj")), "opened {:?}", d.path());
+    assert!(!d.app().session.is_dirty());
+
+    // nothing unsaved: it opens at once; a file that is gone is skipped
+    sent.borrow_mut().extend([dir.join("gone.fcproj"), a.clone()]);
+    d.frames(3);
+    assert!(d.app().ui.clip_dialog.is_none(), "no prompt without unsaved changes");
+    assert_eq!(d.path().as_deref(), Some(a_path.as_str()));
+
+    // a file that is not a project is imported, as a drop on the window would be
+    let items = d.app().session.project.items.len();
+    let wav = dir.join("tone.wav");
+    std::fs::write(&wav, filmcraft_engine::previews::write_wav_f32(&[0.0; 4_800], 48_000)).unwrap();
+    sent.borrow_mut().push(wav);
+    d.frames(3);
+    assert_eq!(d.app().session.project.items.len(), items + 1, "{}", d.app().ui.status);
+}

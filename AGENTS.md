@@ -77,6 +77,7 @@ panic path, and fix a crash before building on top of it.
    uses `unsafe_code = "deny"` with `#[allow(unsafe_code)]` only on its FFI modules, a
    `// SAFETY:` comment on every `unsafe` block, a safe `Result`-returning public API, and the
    pure-Rust decoder as the tested fallback ([ADR 0001](docs/adr/0001-platform-ffi.md)).
+   Fork exception: macOS open-documents events ([fork ADR 0001](docs/adr/fork-0001-macos-open-documents.md)).
 4. **Every input-derived number is hostile.** Media files, project and interchange files, presets, fonts,
    CLI / MCP / control-channel parameters and UI state are untrusted. Index and slice with `get()` (or
    validate bounds once, up front, for a hot loop); slice strings only at char boundaries; use

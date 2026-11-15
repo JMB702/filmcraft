@@ -44,6 +44,9 @@ pub mod media_foundation;
 pub mod nvdec;
 #[cfg(any(target_os = "windows", all(target_os = "linux", target_pointer_width = "64")))]
 pub mod nvenc;
+/// Files the system asks FilmCraft to open (macOS open-documents event). Safe API; the
+/// `unsafe` is in its macOS-only `appkit` module (docs/adr/fork-0001-macos-open-documents.md).
+pub mod open_documents;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod vaapi;
 #[cfg(target_os = "macos")]
