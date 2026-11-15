@@ -95,7 +95,7 @@ fn fake_app(live: &Path, open: &str, dirty: bool) -> Arc<Mutex<Vec<Value>>> {
                     }
                     let cmd = &req["params"]["command"];
                     let result = match cmd.as_str() {
-                        Some("file.diskStatus") => json!({"path": open, "dirty": dirty, "onDisk": "same"}),
+                        Some("file.diskStatus") => json!({"path": open, "dirty": dirty, "onDisk": "same", "conflict": dirty}),
                         Some("history.groupBegin") => json!({"group": 7}),
                         _ => json!({}),
                     };
@@ -123,6 +123,7 @@ fn a_script_runs_in_the_app_that_has_the_project_open_as_one_undo_step() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(stderr.contains("running in FilmCraft (pid"), "{stderr}");
+    assert!(!stderr.contains("asking its user"), "{stderr}");
     assert_eq!(commands(&seen), ["history.groupBegin", "file.newBin", "file.newBin", "history.groupEnd", "file.save"]);
     let end = &seen.lock().unwrap()[3];
     assert_eq!(end["params"]["group"], 7);
@@ -139,6 +140,8 @@ fn the_app_is_not_saved_over_its_own_unsaved_changes() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(stderr.contains("not saved"), "{stderr}");
+    // the stand-in app is also asking about a newer file: the run says whose version it sees
+    assert!(stderr.contains("it is asking its user which to keep"), "{stderr}");
     assert_eq!(commands(&seen), ["file.newBin"]);
     // --save-as elsewhere is a copy; the app keeps its project
     let copy = env.dir.path().join("Copy.fcproj");

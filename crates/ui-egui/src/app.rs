@@ -8,7 +8,7 @@ use super::*;
 
 mod commands;
 mod control;
-mod disk_watch;
+pub(crate) mod disk_watch;
 mod files;
 mod frame;
 mod gpu;
@@ -69,6 +69,8 @@ impl FilmcraftApp {
             pending_panel_raise: None,
             control_input_only: false,
             native_window_focused: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            disk_waker: None,
             synthetic_modifiers: egui::Modifiers::NONE,
             deferred: Vec::new(),
             ui_requests: Vec::new(),

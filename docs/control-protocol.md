@@ -232,8 +232,10 @@ shows at once (`apps/filmcraft/src/live.rs`, `crates/automation/src/live.rs`).
 - `file.saveConflictCopy {path?, reload?=true}` → `{copy, reloaded}`: write this version beside the
   project as `<name> (my changes YYYY-MM-DD HHMMSS).fcproj`, then reload the file's version.
 
-The app checks its project file every 2 seconds and when its window gains focus. A changed file
-reloads by itself when there is nothing unsaved; otherwise the **Project Changed on Disk** dialog
+The app checks its project file every 2 seconds (a small thread watches its size and modification
+time, so a hidden, minimized or covered window notices too), when its window gains focus, and
+before it answers any control request, so a tool that just wrote the file never reads the old
+project back. A changed file reloads by itself when there is nothing unsaved; otherwise the **Project Changed on Disk** dialog
 asks (ids `diskConflict.reload`, `diskConflict.keep`, `diskConflict.copy`). A refused Save opens the
 same dialog, where Keep Mine saves over the file.
 
@@ -252,7 +254,9 @@ filmcraft-cli --live inspect project                                    # the on
 filmcraft-cli --headless --project ~/Films/Film.fcproj --save run build.jsonl  # edit the file anyway
 ```
 
-`--live` fails (exit 1) when no app has the project open; `--headless` never asks, and the app then
+If the app is asking about a newer file on disk (it has unsaved changes), the CLI says so: until its
+user answers, the run sees and edits the app's version. `--live` fails (exit 1) when no app has the
+project open; `--headless` never asks, and the app then
 offers to reload. An app that has P open but does not answer within 5 s stops the run rather than
 risk writing behind it. `export`, `render` and `mcp` stay headless unless `--live` is given.
 

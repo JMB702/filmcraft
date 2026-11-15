@@ -260,6 +260,10 @@ pub struct FilmcraftApp {
     pub(crate) control_input_only: bool,
     /// Backend focus before synthetic input changes egui's effective focus for this frame.
     pub(crate) native_window_focused: Option<bool>,
+    /// Wakes a hidden window when its project file changes on disk (`app/disk_watch.rs`);
+    /// `Some(None)` once starting it failed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) disk_waker: Option<Option<app::disk_watch::FileWaker>>,
     /// Modifiers owned by an in-flight control gesture, carried between its input frames.
     synthetic_modifiers: egui::Modifiers,
     /// Requests waiting for the UI to show an element: (request, give-up time).

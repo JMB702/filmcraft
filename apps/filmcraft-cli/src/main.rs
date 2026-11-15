@@ -219,9 +219,14 @@ impl Backend {
         let dir = filmcraft_automation::live::live_dir();
         match live_route::route(a, dir.as_deref(), live_route::ASK_TIMEOUT).await {
             Err(e) => fail(e),
-            Ok(live_route::Route::Live { app, client, project, dirty }) => {
+            Ok(live_route::Route::Live { app, client, project, dirty, conflict }) => {
                 let shown = project.as_deref().unwrap_or("its unsaved project");
                 diag(format_args!("filmcraft-cli: running in FilmCraft (pid {}), which has {shown} open; the changes show there", app.pid));
+                if conflict {
+                    diag(format_args!(
+                        "filmcraft-cli: note: the file changed on disk while FilmCraft has unsaved changes; it is asking its user which to keep, and until then this run sees and edits the app's version"
+                    ));
+                }
                 Backend::Live(Box::new(LiveRun { client, pid: app.pid, project, dirty_before: dirty, group: None }))
             }
             Ok(live_route::Route::Headless { open_in }) => {
