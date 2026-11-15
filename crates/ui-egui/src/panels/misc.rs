@@ -223,9 +223,10 @@ pub const MARKER_FILTER: [filmcraft_project::Label; 16] = filmcraft_project::Lab
 /// selections from routing colour changes to another item (#1143).
 pub(crate) fn marker_label_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, marker: &filmcraft_project::Marker, prefix: &str) {
     if let Some(owner) = super::marker_properties::Owner::current(app, false) {
-        marker_owned_menu(app, ui, marker, prefix, owner);
+        marker_owned_actions(app, ui, marker, prefix, owner);
     }
 }
+/// A marker's context menu: its title and comment, then the actions.
 pub(crate) fn marker_owned_menu(
     app: &mut FilmcraftApp,
     ui: &mut egui::Ui,
@@ -233,6 +234,11 @@ pub(crate) fn marker_owned_menu(
     prefix: &str,
     owner: super::marker_properties::Owner,
 ) {
+    super::markers_panel::menu_header(app, ui, marker, prefix);
+    marker_owned_actions(app, ui, marker, prefix, owner);
+}
+
+fn marker_owned_actions(app: &mut FilmcraftApp, ui: &mut egui::Ui, marker: &filmcraft_project::Marker, prefix: &str, owner: super::marker_properties::Owner) {
     let params = |color: &str| {
         let mut p = owner.params();
         p["marker"] = serde_json::json!(marker.id.0);

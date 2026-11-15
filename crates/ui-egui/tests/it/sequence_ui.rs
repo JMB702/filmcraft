@@ -728,6 +728,8 @@ fn marker_panel_search_selection_filters_and_palette_manager() {
     assert_eq!(d.ids("markers.row."), vec![format!("markers.row.{a}")]);
     d.set_text("markers.search", "review");
     assert_eq!(d.ids("markers.row.").len(), 2);
+    // the row shows the comment itself, not only on hover
+    assert_eq!(d.ids("markers.comment."), vec![format!("markers.comment.{b}")]);
     d.click(&format!("markers.row.{a}"));
     d.ok("ui.click", json!({"id":format!("markers.row.{b}"),"modifiers":{"command":true}}));
     d.frames(2);

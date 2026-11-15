@@ -9,6 +9,7 @@ pub(super) fn marker_menu(app: &mut FilmcraftApp, ctx: &egui::Context, ui: &mut 
         ui.close();
         return;
     };
+    crate::panels::markers_panel::menu_header(app, ui, &marker, "timeline.markerMenu");
     let label = crate::i18n::t("Edit Marker…");
     let r = ui.button(label);
     app.auto.add("timeline.markerMenu.markers.edit", r.rect, label);

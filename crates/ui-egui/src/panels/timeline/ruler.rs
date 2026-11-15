@@ -185,7 +185,7 @@ pub(super) fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, se
 }
 
 /// The ruler's marker row: one pentagon per marker in its colour, its range band behind it and,
-/// on hover, its name.
+/// on hover, its title and comment.
 fn draw_markers(app: &mut FilmcraftApp, ui: &egui::Ui, clip: &egui::Painter, layout: &Layout, seq: &Sequence) {
     let ruler = layout.ruler;
     let marker_y = ruler.min.y + 2.0;
@@ -212,9 +212,10 @@ fn draw_markers(app: &mut FilmcraftApp, ui: &egui::Ui, clip: &egui::Painter, lay
         }
         let mr = marker_rect(layout, m.start);
         app.auto.add(&format!("timeline.marker.{}", m.id.0), mr, &m.name);
-        if (ui.rect_contains_pointer(mr) || end.is_some_and(|r| ui.rect_contains_pointer(r))) && !m.name.is_empty() {
+        // the hover shows the title and the comment, even for a marker with only a comment
+        if (ui.rect_contains_pointer(mr) || end.is_some_and(|r| ui.rect_contains_pointer(r))) && !(m.name.trim().is_empty() && m.comment.trim().is_empty()) {
             egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique(("mk", m.id.0)), egui::PopupAnchor::Pointer).show(|ui| {
-                ui.label(&m.name);
+                crate::panels::markers_panel::marker_tooltip(ui, m);
             });
         }
     }
