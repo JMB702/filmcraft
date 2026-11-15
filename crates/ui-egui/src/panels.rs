@@ -7,6 +7,7 @@ pub mod clip_dialogs;
 pub mod clip_mismatch;
 pub mod color_dialogs;
 pub mod dialogs;
+pub mod disk_conflict;
 pub mod effect_controls;
 pub mod effects;
 pub mod essential_sound;
