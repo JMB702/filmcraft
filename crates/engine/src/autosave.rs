@@ -644,6 +644,8 @@ struct Snapshot {
     project: Arc<Project>,
     revision: u64,
     path: Option<String>,
+    /// When "also save the project" may write the project file ([`crate::disk_watch`]).
+    guard: crate::disk_watch::AutosaveGuard,
 }
 
 enum Msg {
@@ -791,8 +793,8 @@ impl Persistence {
         })
     }
 
-    pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>) {
-        self.send(Msg::Dirty(Snapshot { project, revision, path }));
+    pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>, guard: crate::disk_watch::AutosaveGuard) {
+        self.send(Msg::Dirty(Snapshot { project, revision, path, guard }));
     }
 
     pub(crate) fn send_clean(&self) {
@@ -1104,11 +1106,16 @@ impl Worker {
                 if self.prefs.save_current_project
                     && let Some(p) = &s.path
                 {
-                    match filmcraft_format::atomic_write(Path::new(p), &bytes) {
-                        Ok(()) => {
-                            let _ = self.events.send(WorkerEvent::SavedProject { path: p.clone(), revision: s.revision });
-                        }
-                        Err(e) => self.error(format!("saving {p}: {e}")),
+                    // never over a file another program changed since the session read or wrote it
+                    match s.guard.allows(p) {
+                        Err(m) => self.error(m),
+                        Ok(()) => match filmcraft_format::atomic_write(Path::new(p), &bytes) {
+                            Ok(()) => {
+                                s.guard.wrote(p, &bytes);
+                                let _ = self.events.send(WorkerEvent::SavedProject { path: p.clone(), revision: s.revision });
+                            }
+                            Err(e) => self.error(format!("saving {p}: {e}")),
+                        },
                     }
                 }
                 Ok(path)

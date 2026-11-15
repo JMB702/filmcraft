@@ -17,6 +17,7 @@ pub mod clip_ops;
 pub mod color;
 pub mod commands;
 pub mod demo;
+pub mod disk_watch;
 pub mod doc_path;
 pub mod essential_sound;
 pub mod export_tools;
@@ -178,6 +179,12 @@ pub trait Services: Send + Sync {
     fn write_file_new(&self, _path: &str, _data: &[u8]) -> std::io::Result<()> {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "exclusive file creation is unavailable on this host"))
     }
+    /// Size and modification time (nanoseconds since the Unix epoch, `None` when the host has
+    /// none) of a file, an error when it is missing: how [`disk_watch`] notices that another
+    /// program changed the open project's file. The default has no time, so every check reads the file.
+    fn file_stamp(&self, path: &str) -> std::io::Result<(u64, Option<u128>)> {
+        self.file_size(path).map(|n| (n, None))
+    }
     /// Size of a file in bytes (an error when it is missing). Hosts should override this: the
     /// default reads the whole file.
     fn file_size(&self, path: &str) -> std::io::Result<u64> {
@@ -274,6 +281,13 @@ impl Services for FsServices {
     fn file_size(&self, path: &str) -> std::io::Result<u64> {
         let m = std::fs::metadata(path)?;
         if m.is_file() { Ok(m.len()) } else { Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path} is not a file"))) }
+    }
+    fn file_stamp(&self, path: &str) -> std::io::Result<(u64, Option<u128>)> {
+        let m = std::fs::metadata(path)?;
+        if !m.is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path} is not a file")));
+        }
+        Ok((m.len(), m.modified().ok().and_then(disk_watch::nanos)))
     }
     fn list_dir(&self, dir: &str) -> Option<std::io::Result<Vec<String>>> {
         let dir = if dir.is_empty() { "." } else { dir };
@@ -623,6 +637,10 @@ pub struct Session {
     pub media_scan: Option<media_watch::MediaScan>,
     /// Automatic relinking's worker threads ([`Session::start_auto_relink`], iCloud downloads).
     pub relink_auto: relink_auto::Runtime,
+    /// The project file as this session last read or wrote it ([`disk_watch`]).
+    pub disk: disk_watch::DiskTracker,
+    /// The open undo group of a live-channel run (`history.groupBegin`).
+    pub history_group: disk_watch::HistoryGroup,
 }
 
 /// An export advanced a batch at a time on the host's thread ([`Session::pump_jobs`]).
@@ -719,6 +737,8 @@ impl Session {
             media_stamps: Default::default(),
             media_scan: None,
             relink_auto: Default::default(),
+            disk: Default::default(),
+            history_group: Default::default(),
         }
     }
 
@@ -787,15 +807,16 @@ impl Session {
     /// channel send; serialization happens on the worker). Called after every command.
     pub fn sync_persistence(&mut self) {
         let dirty = self.is_dirty();
-        let Some(p) = self.persistence.as_mut() else { return };
+        let Some(p) = self.persistence.as_ref() else { return };
         let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
         if p.last_sent.as_ref() == Some(&cur) {
             return;
         }
-        if dirty {
-            p.send_dirty(self.project.clone(), self.revision, self.path.clone());
-        } else {
-            p.send_clean();
+        let guard = dirty.then(|| disk_watch::autosave_expectation(self));
+        let Some(p) = self.persistence.as_mut() else { return };
+        match guard {
+            Some(guard) => p.send_dirty(self.project.clone(), self.revision, self.path.clone(), guard),
+            None => p.send_clean(),
         }
         p.last_sent = Some(cur);
     }
@@ -815,6 +836,11 @@ impl Session {
                     if self.path.as_deref() == Some(path.as_str()) && revision > self.saved_revision && revision <= self.revision =>
                 {
                     self.saved_revision = revision;
+                    // what the worker wrote is now the file as this session knows it
+                    let own = self.disk.own_write.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                    if let Some((_, stamp)) = own.filter(|(p, _)| *p == path) {
+                        self.disk.base = Some(stamp);
+                    }
                 }
                 autosave::WorkerEvent::Error(m) => {
                     self.log.push(panels::Level::Error, "autosave", m.clone());
