@@ -192,3 +192,22 @@ fn save_over_a_newer_file_asks_and_keep_mine_saves() {
     let on_disk = bins_on_disk(&d.path);
     assert!(on_disk.contains(&"Mine".to_string()) && !on_disk.contains(&"Theirs".to_string()), "{on_disk:?}");
 }
+
+/// An outside tool that wrote the file and then asks the app (`filmcraft-cli --live inspect`) gets
+/// the file's version: a request looks at the file before it is answered, without waiting for
+/// the watcher's next look.
+#[test]
+fn a_request_right_after_an_outside_write_sees_the_new_file() {
+    let mut d = Driver::new();
+    d.write_from_outside("Written headless");
+    let v = d.exec("project.inspect", json!({}));
+    assert!(v.to_string().contains("Written headless"), "{v}");
+    assert!(!d.app().session.is_dirty());
+    // with unsaved work here the request is answered from this version, and the question waits
+    d.exec("file.newBin", json!({"name": "Mine"}));
+    d.write_from_outside("Second outside write");
+    let v = d.exec("project.inspect", json!({}));
+    assert!(v.to_string().contains("Mine") && !v.to_string().contains("Second outside write"), "{v}");
+    assert!(d.app().session.disk.conflict.is_some());
+    assert!(d.has("diskConflict.reload"));
+}

@@ -21,8 +21,9 @@ pub const ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The decision.
 pub enum Route {
-    /// Run in this app, which has `project` open (`None`: `--live` without `--project`).
-    Live { app: Box<Announcement>, client: BridgeClient, project: Option<String>, dirty: bool },
+    /// Run in this app, which has `project` open (`None`: `--live` without `--project`), with
+    /// unsaved changes (`dirty`), and asking its user about a newer file on disk (`conflict`).
+    Live { app: Box<Announcement>, client: BridgeClient, project: Option<String>, dirty: bool, conflict: bool },
     /// Run in a session of our own.
     Headless {
         /// `--headless` was given while this app has the project open (pid): the run goes on,
@@ -31,13 +32,14 @@ pub enum Route {
     },
 }
 
-/// The file an app has open and whether it has unsaved changes, asked over its live channel.
-async fn ask(client: &BridgeClient, timeout: Duration) -> Result<(Option<String>, bool), String> {
+/// The file an app has open, whether it has unsaved changes and whether it is asking about a
+/// newer file on disk, asked over its live channel.
+async fn ask(client: &BridgeClient, timeout: Duration) -> Result<(Option<String>, bool, bool), String> {
     let r: Value = tokio::time::timeout(timeout, client.execute("file.diskStatus", json!({})))
         .await
         .map_err(|_| "not answering".to_string())?
         .map_err(|e| e.to_string())?;
-    Ok((r["path"].as_str().map(str::to_string), r["dirty"].as_bool().unwrap_or(false)))
+    Ok((r["path"].as_str().map(str::to_string), r["dirty"].as_bool().unwrap_or(false), r["conflict"].as_bool().unwrap_or(false)))
 }
 
 /// Decide where the run `a` goes, looking for apps in `dir` (`None`: no live channel here).
@@ -65,8 +67,8 @@ pub async fn route(a: &Args, dir: Option<&Path>, timeout: Duration) -> Result<Ro
             [] => Err("--live: no FilmCraft is running (start the app, or run without --live)".into()),
             [app] => {
                 let client = BridgeClient::live(app);
-                let (path, dirty) = ask(&client, timeout).await.map_err(|e| format!("--live: FilmCraft (pid {}) is {e}", app.pid))?;
-                Ok(Route::Live { app: Box::new(app.clone()), client, project: path, dirty })
+                let (path, dirty, conflict) = ask(&client, timeout).await.map_err(|e| format!("--live: FilmCraft (pid {}) is {e}", app.pid))?;
+                Ok(Route::Live { app: Box::new(app.clone()), client, project: path, dirty, conflict })
             }
             many => Err(format!(
                 "--live: {} FilmCraft windows are running; name the project with --project ({})",
@@ -83,8 +85,8 @@ pub async fn route(a: &Args, dir: Option<&Path>, timeout: Duration) -> Result<Ro
         }
         let client = BridgeClient::live(app);
         match ask(&client, timeout).await {
-            Ok((Some(path), dirty)) if live::same_file(&path, project) => {
-                return Ok(Route::Live { app: Box::new(app.clone()), client, project: Some(path), dirty });
+            Ok((Some(path), dirty, conflict)) if live::same_file(&path, project) => {
+                return Ok(Route::Live { app: Box::new(app.clone()), client, project: Some(path), dirty, conflict });
             }
             // it opened another project since it wrote its announcement
             Ok(_) => {}

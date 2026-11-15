@@ -18,6 +18,7 @@ impl FilmcraftApp {
         let Some(rx) = self.control_rx.take() else { return };
         let now = self.now();
         let mut reqs: Vec<(ControlRequest, f64)> = std::mem::take(&mut self.deferred);
+        let waiting = reqs.len();
         while let Ok(req) = rx.try_recv() {
             // UI requests need rendered frames: raise the window if `ui` hasn't run recently
             // (occluded macOS windows stop running `ui`).
@@ -27,6 +28,13 @@ impl FilmcraftApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
             }
             reqs.push((req, now + 3.0));
+        }
+        // An outside tool may have just written the project file: the reply describes (and edits)
+        // what is on disk now, not the project from before (reloaded, or asked about when there
+        // are unsaved changes here). One `stat` while the file is unchanged.
+        #[cfg(not(target_arch = "wasm32"))]
+        if reqs.len() > waiting {
+            self.check_project_file();
         }
         for (req, deadline) in reqs {
             if req.method.starts_with("ui.") && req.method != "ui.screenshot" {

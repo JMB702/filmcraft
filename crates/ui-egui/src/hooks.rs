@@ -82,6 +82,10 @@ pub struct HostHooks {
     /// project this window has open. Called on every logic pass with the current path: the host
     /// acts only when it differs from the last one.
     pub project_path_changed: Option<Box<dyn FnMut(Option<&str>)>>,
+    /// Files the system asked FilmCraft to open since the last call (macOS: a Finder double-click,
+    /// `open -a`, a drop on the Dock icon). Polled on every logic pass; the host wakes the UI when
+    /// some arrive. See [`FilmcraftApp::open_documents`].
+    pub opened_documents: Option<Box<dyn FnMut() -> Vec<std::path::PathBuf>>>,
     /// Open a file in its default application, or (`true`) reveal it in the file manager (Edit ▸
     /// Edit Original, Help ▸ Reveal Log Files).
     pub open_path: Option<Box<dyn FnMut(&str, bool) -> Result<(), String>>>,

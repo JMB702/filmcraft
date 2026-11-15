@@ -38,6 +38,20 @@ impl FilmcraftApp {
     /// file opens instead, as File ▸ Open would (asking first about unsaved changes, #3843).
     fn import_dropped(&mut self, ctx: &egui::Context, dropped: &[egui::DroppedFileHandle], pointer: Option<(egui::Pos2, egui::ViewportId)>) {
         let paths: Vec<String> = dropped.iter().map(|f| f.path()).filter(|p| p.exists()).map(|p| p.to_string_lossy().to_string()).collect();
+        self.open_or_import(ctx, paths, pointer);
+    }
+
+    /// Files the system asked FilmCraft to open while it runs (Finder, `open -a`, the Dock icon;
+    /// [`crate::Hooks::opened_documents`]): a project opens as File ▸ Open would, asking first
+    /// about unsaved changes; other files import into the project, as a drop on the window does.
+    pub fn open_documents(&mut self, ctx: &egui::Context, paths: Vec<std::path::PathBuf>) {
+        let paths: Vec<String> = paths.into_iter().filter(|p| p.exists()).map(|p| p.to_string_lossy().into_owned()).collect();
+        self.open_or_import(ctx, paths, None);
+    }
+
+    /// The shared part of a drop and an open request: a project file opens (the rest is not
+    /// imported into either project), anything else is imported.
+    fn open_or_import(&mut self, ctx: &egui::Context, paths: Vec<String>, pointer: Option<(egui::Pos2, egui::ViewportId)>) {
         if let Some(project) = paths.iter().find(|p| is_project_file(p)) {
             // one project is open at a time: the rest of the drop is not imported into either
             let _ = crate::menus::invoke(self, ctx, "file.open", json!({"path": project}));
