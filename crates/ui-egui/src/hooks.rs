@@ -77,6 +77,11 @@ pub struct HostHooks {
     /// (macOS: `orderFrontRegardless`). Without it the app only requests a repaint: it never
     /// activates itself for an agent, because the user's keystrokes would land here.
     pub raise_without_focus: Option<Box<dyn FnMut()>>,
+    /// The open project's file changed (opened, saved under a new name, closed: `None`). The
+    /// desktop host updates its live-channel announcement with it, so `filmcraft-cli` knows which
+    /// project this window has open. Called on every logic pass with the current path: the host
+    /// acts only when it differs from the last one.
+    pub project_path_changed: Option<Box<dyn FnMut(Option<&str>)>>,
     /// Open a file in its default application, or (`true`) reveal it in the file manager (Edit ▸
     /// Edit Original, Help ▸ Reveal Log Files).
     pub open_path: Option<Box<dyn FnMut(&str, bool) -> Result<(), String>>>,

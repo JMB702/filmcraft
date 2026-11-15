@@ -1978,8 +1978,10 @@ fn build() -> Vec<CommandSpec> {
         cmd!("file.importAaf", "Import AAF…", [], None, r#"{"path":str,"bin":binId?}"#, always, |s, p| {
             crate::aaf_omf::import_document(s, p, "file.importAaf")
         }),
-        cmd!("file.save", "Save", ["File"], Some("Cmd+S"), r#"{"path":str?}"#, always, |s, p| {
+        cmd!("file.save", "Save", ["File"], Some("Cmd+S"), r#"{"path":str?,"force":bool?}"#, always, |s, p| {
             let path = str_p(p, "path").map(str::to_string).or_else(|| s.path.clone()).ok_or_else(|| bad("file.save", "no path (use Save As)"))?;
+            // never silently over a file another program changed meanwhile (`force` overrides)
+            crate::disk_watch::guard_save(s, &path, bool_p(p, "force").unwrap_or(false))?;
             write_project(s, &path, true)
         }),
         cmd!("file.saveAs", "Save As…", ["File"], Some("Cmd+Shift+S"), r#"{"path":str}"#, always, |s, p| {
@@ -4215,6 +4217,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::graphic_templates::commands());
     v.extend(crate::shortcuts::commands());
     v.extend(crate::relink::commands());
+    v.extend(crate::disk_watch::commands());
     v.extend(crate::proxies::commands());
     v.extend(crate::project_manager::commands());
     v.extend(crate::masks::commands());
@@ -5348,6 +5351,7 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
     }
     s.services.write_file(path, &bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     if adopt {
+        crate::disk_watch::saved(s, path, &bytes);
         s.path = Some(path.to_string());
         s.previews_follow_path();
         s.note_recent_project();
@@ -5388,6 +5392,8 @@ pub(crate) fn install_project(s: &mut Session, proj: filmcraft_project::Project,
         s.previews.set_dir(Some(crate::project_tools::previews_dir_for(&s.project, p, &s.prefs.auto_save.scratch_folders)));
     }
     s.path = path;
+    // `open_project` and `recover` record what they read; any other new project has nothing to compare
+    crate::disk_watch::forget(s);
     s.revision += 1;
     // A recovered project is unsaved: its saved revision is one that never existed.
     s.saved_revision = if clean { s.revision } else { 0 };
@@ -5397,6 +5403,7 @@ pub(crate) fn install_project(s: &mut Session, proj: filmcraft_project::Project,
 }
 
 fn open_project(s: &mut Session, path: &str) -> Result<Value> {
+    let stat = crate::disk_watch::before_read(s, path);
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     if crate::interchange::is_premiere(path, &bytes) {
         return open_premiere(s, path, &bytes);
@@ -5405,6 +5412,7 @@ fn open_project(s: &mut Session, path: &str) -> Result<Value> {
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
     crate::masks::discard_jobs(s);
     install_project(s, loaded.project, Some(path.to_string()), true);
+    crate::disk_watch::loaded(s, stat, &bytes);
     if let Some(view) = loaded.view.filter(|_| s.prefs.timeline.restore_open_sequences) {
         s.restore_project_view(view);
     }
@@ -5456,6 +5464,7 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
     let saved_at = per.local_time(c.meta.saved_unix);
     let loaded = crate::autosave::load_candidate(&c).map_err(EngineError::Other)?;
     install_project(s, loaded.project, c.meta.project_path.clone(), false);
+    crate::disk_watch::recovered(s, c.meta.project_path.as_deref(), c.meta.saved_unix);
     if let Some(seq) = s.state.active_sequence {
         s.events.push(crate::Event::OpenSequence(seq));
     }

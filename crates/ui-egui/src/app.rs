@@ -8,6 +8,7 @@ use super::*;
 
 mod commands;
 mod control;
+mod disk_watch;
 mod files;
 mod frame;
 mod gpu;
@@ -284,6 +285,9 @@ impl FilmcraftApp {
         self.tick_media_refresh(ctx, now);
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_auto_relink(ctx, now);
+        self.tick_project_path();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.tick_disk_watch(ctx, now);
     }
 
     /// Apply engine events that change the active sequence/view, IME target, toast or project.

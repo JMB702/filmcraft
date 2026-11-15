@@ -21,3 +21,7 @@ base64 = "0.23"
 schemars = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"
+
+# The live channel (src/live.rs): this user's id and whether a pid is running, without `unsafe`.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "process"] }
