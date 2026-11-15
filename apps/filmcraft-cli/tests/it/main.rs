@@ -1,4 +1,5 @@
 mod cli;
+mod live;
 mod workflows;
 
 fn filmcraft_command() -> std::process::Command {

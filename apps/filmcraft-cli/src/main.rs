@@ -31,6 +31,7 @@ macro_rules! out {
 }
 
 mod args;
+mod live_route;
 mod probe;
 mod project_lock;
 
@@ -62,7 +63,7 @@ fn stdout_failed(e: std::io::Error) {
 }
 
 const HELP: &str = "\
-filmcraft-cli: drive FilmCraft from the shell (headless engine, or the live app with --bridge)
+filmcraft-cli: drive FilmCraft from the shell (headless engine, or live in the app that has the project open)
 
 USAGE
   filmcraft-cli [OPTIONS] <SUBCOMMAND> [ARGS]
@@ -103,12 +104,25 @@ SUBCOMMANDS
   --version                     print the version
 
 OPTIONS
-  --project <p.fcproj>          open this project first (headless)
+  --project <p.fcproj>          the project to work on. When a running FilmCraft has it open,
+                                exec, run, import, inspect, commands and describe run in that
+                                app (live): the changes show there at once, a `run` script is
+                                one undo step, and the file is never rewritten behind the app's
+                                back. Otherwise the file is opened here (headless). stderr says
+                                which. export, render and mcp read it headless unless --live
+  --live                        run in the app or fail: no running FilmCraft has --project open,
+                                or (without --project) not exactly one FilmCraft is running
+  --headless                    never use a running app; open --project here. An app that has
+                                it open reloads the saved file, or asks first if it has unsaved
+                                changes
   --demo                        open the built-in demo project (headless)
   --save                        save the project back to --project when done; runs saving one
-                                project take turns, so each edits what the last one saved
-  --save-as <p.fcproj>          save the project to this path when done
-  --bridge <127.0.0.1:PORT>     send commands to the running app (`filmcraft --control PORT`)
+                                project take turns, so each edits what the last one saved.
+                                Live: saves in the app, unless the app had unsaved changes of
+                                its own before the run (then it says so and leaves them to you)
+  --save-as <p.fcproj>          save the project to this path when done (live: a copy; the app
+                                keeps its project)
+  --bridge <127.0.0.1:PORT>     send commands to an app started with `filmcraft --control PORT`
   --data-dir <dir>              FilmCraft data directory for user export presets (headless;
                                 default: the app's data directory)
   --keep-going                  `run`: report failing lines and continue
@@ -118,6 +132,12 @@ VALUES
   key=value parses value as JSON when it can (3.5, true, [1,2], {\"a\":1}), else as a string:
   `exec timeline.razor seconds=3.5`, `exec file.newBin name=Selects`.
   Times: 254016000000 ticks per second; most commands also take seconds=, frame= or timecode=.
+
+LIVE EDITING
+  With cut.fcproj open in FilmCraft, `filmcraft-cli --project cut.fcproj run build.jsonl`
+  runs build.jsonl in the app: new sequences, bins and clips appear there as it runs, and
+  Edit ▸ Undo takes the whole script back. Add --save to save it in the app when done.
+  The app announces itself in a private per-user folder (see docs/control-protocol.md).
 
 EXIT STATUS
   0 success · 1 a command failed, or export/render drew offline media without --allow-offline
@@ -163,20 +183,59 @@ fn fail(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1)
 }
 
-/// Where commands go: an in-process session, or the desktop app's control channel.
+/// Where commands go: an in-process session, the desktop app's control channel (`--bridge`), or
+/// the running app that has `--project` open (live, see [`live_route`]).
 enum Backend {
-    Local(Box<Session>),
+    /// The session, and the lock held while it saves over its file (`project_lock`).
+    Local(Box<Session>, Option<std::fs::File>),
     Bridge(BridgeClient),
+    Live(Box<LiveRun>),
+}
+
+/// A run in the app that has the project open.
+struct LiveRun {
+    client: BridgeClient,
+    pid: u32,
+    /// The project the app has open (`None`: an unsaved one, `--live` without `--project`).
+    project: Option<String>,
+    /// The app had unsaved changes before this run: `--save` then leaves saving to the user.
+    dirty_before: bool,
+    /// The undo group of a `run` script (`history.groupBegin`).
+    group: Option<u64>,
 }
 
 impl Backend {
-    fn open(a: &Args) -> Self {
+    async fn open(a: &Args) -> Self {
         if let Some(addr) = a.opt("--bridge") {
-            if a.opt("--project").is_some() || a.flag("--demo") {
+            if a.opt("--project").is_some() || a.flag("--demo") || a.flag("--live") || a.flag("--headless") {
                 usage("--bridge drives the running app; open projects there (exec file.open path=…)");
             }
             return Backend::Bridge(BridgeClient::new(addr).unwrap_or_else(|e| usage(e)));
         }
+        let dir = filmcraft_automation::live::live_dir();
+        match live_route::route(a, dir.as_deref(), live_route::ASK_TIMEOUT).await {
+            Err(e) => fail(e),
+            Ok(live_route::Route::Live { app, client, project, dirty }) => {
+                let shown = project.as_deref().unwrap_or("its unsaved project");
+                diag(format_args!("filmcraft-cli: running in FilmCraft (pid {}), which has {shown} open; the changes show there", app.pid));
+                Backend::Live(Box::new(LiveRun { client, pid: app.pid, project, dirty_before: dirty, group: None }))
+            }
+            Ok(live_route::Route::Headless { open_in }) => {
+                if let Some(pid) = open_in
+                    && let Some(p) = a.opt("--project")
+                {
+                    diag(format_args!(
+                        "filmcraft-cli: --headless: FilmCraft (pid {pid}) has {p} open; it will reload the file, or ask first if it has unsaved changes"
+                    ));
+                }
+                let lock = project_lock::for_save(a);
+                Backend::Local(Box::new(Self::session(a)), lock)
+            }
+        }
+    }
+
+    /// A headless session with `--project` (or `--demo`) open.
+    fn session(a: &Args) -> Session {
         let mut s = Session::default();
         // user export presets (and other per-user libraries) from the data directory
         if let Some(dir) = a.opt("--data-dir").map(std::path::PathBuf::from).or_else(filmcraft_engine::autosave::default_data_dir) {
@@ -189,14 +248,23 @@ impl Backend {
         } else if a.flag("--demo") {
             let _ = s.execute("file.openDemoProject", json!({}));
         }
-        Backend::Local(Box::new(s))
+        s
+    }
+
+    /// For commands that only read the project and write elsewhere (export, render, mcp): headless
+    /// as before, unless `--live` asks for the app.
+    async fn open_reading(a: &Args) -> Self {
+        if a.flag("--live") || a.opt("--bridge").is_some() {
+            return Self::open(a).await;
+        }
+        Backend::Local(Box::new(Self::session(a)), None)
     }
 
     async fn exec(&mut self, id: &str, mut params: Value) -> Result<Value, String> {
         match self {
             // this process exits after the command, so a background export would never be written:
             // long commands wait unless the caller says otherwise (#2342)
-            Backend::Local(s) => {
+            Backend::Local(s, _) => {
                 // mask tracking is applied when its job finishes, which this process never sees (#3302)
                 if (filmcraft_automation::long_job::LONG_COMMANDS.contains(&id) || id == "masks.track")
                     && let Some(p) = params.as_object_mut()
@@ -210,11 +278,54 @@ impl Backend {
             }
             // a blocking export runs as an app job polled by the client (#91, #92)
             Backend::Bridge(b) => b.execute(id, params).await.map_err(|e| e.to_string()),
+            Backend::Live(l) => l.client.execute(id, params).await.map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Live: make the commands that follow one undo step in the app (`run`). Elsewhere a no-op.
+    async fn begin_group(&mut self) {
+        if let Backend::Live(l) = self {
+            l.group = l.client.execute("history.groupBegin", json!({})).await.ok().and_then(|v| v["group"].as_u64());
+        }
+    }
+
+    /// Live: close the undo group `begin_group` opened, under `label`.
+    async fn end_group(&mut self, label: &str) {
+        if let Backend::Live(l) = self
+            && let Some(group) = l.group.take()
+        {
+            let _ = l.client.execute("history.groupEnd", json!({"group": group, "label": label})).await;
         }
     }
 
     /// Save to the --project path (`--save`) or to `--save-as`. Bridge mode saves in the app.
+    /// Live mode saves in the app too, but only when it had no unsaved changes of its own before
+    /// this run (saving would also save those, which is the user's call); `--save-as` elsewhere
+    /// writes a copy and leaves the app's project where it is.
     async fn finish(&mut self, a: &Args) {
+        if let Backend::Live(l) = self {
+            let to_own_file = match (a.opt("--save-as"), l.project.as_deref()) {
+                (Some(target), Some(own)) => filmcraft_automation::live::same_file(target, own),
+                (Some(_), None) => false,
+                (None, _) => a.flag("--save"),
+            };
+            let r = match a.opt("--save-as") {
+                Some(target) if !to_own_file => Some(l.client.execute("file.saveCopy", json!({"path": absolute(target)})).await),
+                _ if to_own_file && l.dirty_before => {
+                    diag(format_args!(
+                        "filmcraft-cli: not saved: FilmCraft (pid {}) had unsaved changes of its own before this run; the run's changes are in the app, save there",
+                        l.pid
+                    ));
+                    None
+                }
+                _ if to_own_file => Some(l.client.execute("file.save", json!({})).await),
+                _ => None,
+            };
+            if let Some(Err(e)) = r {
+                fail(format!("saving: {e}"));
+            }
+            return;
+        }
         let r = if let Some(p) = a.opt("--save-as") {
             Some(self.exec("file.saveAs", json!({"path": p})).await)
         } else if a.flag("--save") {
@@ -363,7 +474,7 @@ async fn cli_bench_decode(a: &Args) {
 }
 
 async fn cli_commands(a: &Args, cmd: &str) {
-    let mut b = Backend::open(a);
+    let mut b = Backend::open(a).await;
     let list = b.exec("command.list", json!({})).await.unwrap_or_else(|e| fail(e));
     let list = list.as_array().cloned().unwrap_or_default();
     if cmd == "describe" {
@@ -394,8 +505,7 @@ async fn cli_commands(a: &Args, cmd: &str) {
 async fn cli_exec(a: &Args) {
     let id = a.pos(1).unwrap_or_else(|| usage("exec <id> [key=value ...]"));
     let params = a.params_from(2).unwrap_or_else(|e| usage(e));
-    let _lock = project_lock::for_save(a);
-    let mut b = Backend::open(a);
+    let mut b = Backend::open(a).await;
     match b.exec(id, params).await {
         Ok(v) => print(a, &v),
         Err(e) => fail(format!("{id}: {e}")),
@@ -410,8 +520,13 @@ async fn cli_run(a: &Args) {
     } else {
         read_text(script).await.unwrap_or_else(|e| fail(format!("{script}: {e}")))
     };
-    let _lock = project_lock::for_save(a);
-    let mut b = Backend::open(a);
+    let mut b = Backend::open(a).await;
+    // live: the whole script is one undo step in the app
+    b.begin_group().await;
+    let label = format!(
+        "filmcraft-cli run {}",
+        std::path::Path::new(script).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| script.to_string())
+    );
     let mut failed = 0;
     for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty() && !l.trim_start().starts_with('#')) {
         let v: Value = serde_json::from_str(line).unwrap_or_else(|e| usage(format!("line {}: {e}", n + 1)));
@@ -422,11 +537,14 @@ async fn cli_run(a: &Args) {
                 outln!("{}", json!({"line": n + 1, "id": id, "ok": false, "error": e}));
                 failed += 1;
                 if !a.flag("--keep-going") {
+                    // what ran stays (as before), one undo step in the app
+                    b.end_group(&label).await;
                     std::process::exit(1);
                 }
             }
         }
     }
+    b.end_group(&label).await;
     b.finish(a).await;
     if failed > 0 {
         std::process::exit(1);
@@ -434,7 +552,7 @@ async fn cli_run(a: &Args) {
 }
 
 async fn cli_inspect(a: &Args) {
-    let mut b = Backend::open(a);
+    let mut b = Backend::open(a).await;
     let what = a.pos(1).unwrap_or("all");
     let mut get = async |id: &str| b.exec(id, json!({})).await.unwrap_or_else(|e| fail(e));
     let v = match what {
@@ -451,8 +569,7 @@ async fn cli_import(a: &Args) {
     if paths.is_empty() {
         usage("import <file>...");
     }
-    let _lock = project_lock::for_save(a);
-    let mut b = Backend::open(a);
+    let mut b = Backend::open(a).await;
     match b.exec("file.import", json!({"paths": paths})).await {
         Ok(v) => print(a, &v),
         Err(e) => fail(format!("import: {e}")),
@@ -462,7 +579,7 @@ async fn cli_import(a: &Args) {
 
 async fn cli_export(a: &Args) {
     if a.flag("--list-presets") {
-        let mut b = Backend::open(a);
+        let mut b = Backend::open_reading(a).await;
         let q = a.pos(1).map(|q| json!({"query": q})).unwrap_or(json!({}));
         match b.exec("export.presets.list", q).await {
             Ok(v) => print(a, &v["presets"]),
@@ -502,7 +619,7 @@ async fn cli_export(a: &Args) {
     if let Some(v) = a.opt("--gpu-rendering") {
         p["gpuRendering"] = json!(v); // off | auto (validated by the export command)
     }
-    let mut b = Backend::open(a);
+    let mut b = Backend::open_reading(a).await;
     let t0 = std::time::Instant::now();
     let r = if a.flag("--queue") {
         let mut q = p.clone();
@@ -535,7 +652,10 @@ async fn cli_render(a: &Args) {
     if a.opt("--bridge").is_some() {
         usage("render is headless; with --bridge use the MCP `render_frame` tool or `exec` ui commands");
     }
-    let Backend::Local(mut s) = Backend::open(a) else { usage("render is headless") };
+    if a.flag("--live") {
+        usage("render is headless; in the app use the MCP `render_frame` tool");
+    }
+    let Backend::Local(mut s, _) = Backend::open_reading(a).await else { usage("render is headless") };
     let secs: f64 = finite_opt(a, "--seconds").unwrap_or(0.0);
     let scale: f32 = finite_opt(a, "--scale").unwrap_or(1.0);
     let out = a.opt("--out").unwrap_or("frame.png");
@@ -551,14 +671,14 @@ async fn cli_render(a: &Args) {
 }
 
 async fn cli_mcp(a: &Args) {
-    if let Some(opt) = a.unknown_opt(&["--bridge", "--project", "--demo", "--data-dir"]) {
+    if let Some(opt) = a.unknown_opt(&["--bridge", "--project", "--demo", "--data-dir", "--headless"]) {
         usage(format!("unknown mcp option `{opt}`"));
     }
     let server = match a.opt("--bridge") {
         Some(addr) => filmcraft_automation::FilmcraftMcp::bridge(addr).unwrap_or_else(|e| usage(e)),
-        None => match Backend::open(a) {
-            Backend::Local(s) => filmcraft_automation::FilmcraftMcp::headless(*s),
-            Backend::Bridge(_) => usage("mcp: use --bridge ADDR to drive a running app"),
+        None => match Backend::open_reading(a).await {
+            Backend::Local(s, _) => filmcraft_automation::FilmcraftMcp::headless(*s),
+            Backend::Bridge(_) | Backend::Live(_) => usage("mcp: use --bridge ADDR to drive a running app"),
         },
     };
     if let Err(e) = server.serve_stdio().await {
