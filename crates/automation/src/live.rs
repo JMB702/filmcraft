@@ -100,7 +100,7 @@ pub fn random_token() -> io::Result<String> {
 
 #[cfg(unix)]
 mod unix {
-    use super::*;
+    use super::{Announcement, FORMAT, MAX_ANNOUNCEMENT, MAX_SOCKET_PATH, Path, PathBuf, io};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
     fn uid() -> u32 {

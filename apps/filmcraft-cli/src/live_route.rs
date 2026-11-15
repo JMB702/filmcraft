@@ -22,7 +22,7 @@ pub const ASK_TIMEOUT: Duration = Duration::from_secs(5);
 /// The decision.
 pub enum Route {
     /// Run in this app, which has `project` open (`None`: `--live` without `--project`).
-    Live { app: Announcement, client: BridgeClient, project: Option<String>, dirty: bool },
+    Live { app: Box<Announcement>, client: BridgeClient, project: Option<String>, dirty: bool },
     /// Run in a session of our own.
     Headless {
         /// `--headless` was given while this app has the project open (pid): the run goes on,
@@ -66,7 +66,7 @@ pub async fn route(a: &Args, dir: Option<&Path>, timeout: Duration) -> Result<Ro
             [app] => {
                 let client = BridgeClient::live(app);
                 let (path, dirty) = ask(&client, timeout).await.map_err(|e| format!("--live: FilmCraft (pid {}) is {e}", app.pid))?;
-                Ok(Route::Live { app: app.clone(), client, project: path, dirty })
+                Ok(Route::Live { app: Box::new(app.clone()), client, project: path, dirty })
             }
             many => Err(format!(
                 "--live: {} FilmCraft windows are running; name the project with --project ({})",
@@ -84,7 +84,7 @@ pub async fn route(a: &Args, dir: Option<&Path>, timeout: Duration) -> Result<Ro
         let client = BridgeClient::live(app);
         match ask(&client, timeout).await {
             Ok((Some(path), dirty)) if live::same_file(&path, project) => {
-                return Ok(Route::Live { app: app.clone(), client, project: Some(path), dirty });
+                return Ok(Route::Live { app: Box::new(app.clone()), client, project: Some(path), dirty });
             }
             // it opened another project since it wrote its announcement
             Ok(_) => {}

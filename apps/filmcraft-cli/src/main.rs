@@ -187,7 +187,11 @@ fn fail(msg: impl std::fmt::Display) -> ! {
 /// the running app that has `--project` open (live, see [`live_route`]).
 enum Backend {
     /// The session, and the lock held while it saves over its file (`project_lock`).
-    Local(Box<Session>, Option<std::fs::File>),
+    Local(
+        Box<Session>,
+        // held, never read: the lock lasts as long as the session that may save
+        #[allow(dead_code)] Option<std::fs::File>,
+    ),
     Bridge(BridgeClient),
     Live(Box<LiveRun>),
 }

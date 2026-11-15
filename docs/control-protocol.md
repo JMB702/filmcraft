@@ -201,6 +201,61 @@ sequence as tone-mapped SDR.
 Ctrl), `Ctrl` (macOS ⌃), `Alt`, `Shift`. The dialog (Edit ▸ Keyboard Shortcuts…, ⌥⌘K) uses ids
 `shortcuts.*` (`shortcuts.key.K`, `shortcuts.cell.<command>`, `shortcuts.ok`, …).
 
+## Live channel (default)
+A normally launched app serves the same control protocol, with no flags, on a **Unix domain socket
+only its user can open**, so an outside tool can edit the project that is open in it and the change
+shows at once (`apps/filmcraft/src/live.rs`, `crates/automation/src/live.rs`).
+
+- **Where:** a private folder (mode `0700`, owned by the user; the app refuses one that is not):
+  `~/Library/Application Support/FilmCraft/live` on macOS, `$XDG_RUNTIME_DIR/filmcraft` (else
+  `~/.local/share/filmcraft/live`) on Linux. `FILMCRAFT_LIVE_DIR` overrides it (tests). Each app
+  binds `<pid>.sock` there (mode `0600`; a path too long for a socket moves to a private temp name)
+  and then writes `<pid>.json`, mode `0600`:
+  `{"format":1,"pid":…,"socket":"…","token":"<64 hex>","project":"/abs/Film.fcproj"|null,"appVersion":"…","startedUnix":…}`.
+  `project` follows the open project within a second. Both files are removed on exit.
+- **Several apps** each announce themselves. An announcement whose pid is dead, or whose socket
+  refuses connections, is stale: readers skip it and the next app to start removes it. Files with
+  the wrong owner or permissions, oversized or malformed files are skipped, never trusted.
+- **Requests** are the JSON lines above, each with the announcement's `token` (the socket's
+  permissions already keep other users out; the token stops a reader of a stale file).
+- **Off:** `filmcraft --no-live` or `FILMCRAFT_LIVE=0`. `--control <port>` still opens the TCP
+  listener as before, alongside. Windows has no live channel yet.
+
+### Commands for outside editors
+- `file.diskStatus` → `{path, dirty, onDisk: "none"|"same"|"changed"|"missing", conflict, revision}`.
+- `history.groupBegin` → `{group}`; `history.groupEnd {group, label?}` → `{grouped, reason?}` folds
+  every edit since the begin into one undo step (not when the user undid past it or another group
+  intervened; `reason` says why).
+- `file.save {force?}`: refuses (with an error saying so) when the project file changed on disk since
+  it was opened or saved here; `force: true` replaces it. Autosave never writes over a newer file.
+- `file.keepMine`: keep this version over the file's newer one (the next save replaces it).
+- `file.saveConflictCopy {path?, reload?=true}` → `{copy, reloaded}`: write this version beside the
+  project as `<name> (my changes YYYY-MM-DD HHMMSS).fcproj`, then reload the file's version.
+
+The app checks its project file every 2 seconds and when its window gains focus. A changed file
+reloads by itself when there is nothing unsaved; otherwise the **Project Changed on Disk** dialog
+asks (ids `diskConflict.reload`, `diskConflict.keep`, `diskConflict.copy`). A refused Save opens the
+same dialog, where Keep Mine saves over the file.
+
+### `filmcraft-cli` finds the app
+`filmcraft-cli --project P …` asks the running apps whether one has `P` open. If one does, the
+commands run in that app (stderr says `running in FilmCraft (pid N), which has P open`) and P is not
+written behind its back. A `run` script is one undo step labelled `filmcraft-cli run <file>`.
+`--save` saves in the app only if it had no unsaved changes before the run (else it says it did
+not); `--save-as Q` writes a copy and leaves the app on P. If no app has P open, the run is headless
+as before.
+
+```sh
+filmcraft-cli --project ~/Films/Film.fcproj --save run build.jsonl     # live if open, else headless
+filmcraft-cli --live --project ~/Films/Film.fcproj exec file.newBin name=Selects  # app required
+filmcraft-cli --live inspect project                                    # the only running app
+filmcraft-cli --headless --project ~/Films/Film.fcproj --save run build.jsonl  # edit the file anyway
+```
+
+`--live` fails (exit 1) when no app has the project open; `--headless` never asks, and the app then
+offers to reload. An app that has P open but does not answer within 5 s stops the run rather than
+risk writing behind it. `export`, `render` and `mcp` stay headless unless `--live` is given.
+
 ## MCP
 `filmcraft-cli mcp` serves MCP on stdio: headless (in-process session; `--demo` / `--project p.fcproj`)
 or `--bridge 127.0.0.1:9876` to drive the running app. Tools: `command_list`, `command_run`,

@@ -35,6 +35,7 @@ impl Live {
         }
     }
 
+    #[cfg(test)]
     pub fn socket(&self) -> &std::path::Path {
         &self.announcement.socket
     }
