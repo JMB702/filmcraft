@@ -75,6 +75,16 @@ pub fn open(app: &mut FilmcraftApp, marker: &Marker) {
         open_owned(app, marker, owner);
     }
 }
+/// The marker that starts on the frame the playhead of the Source (`source`) or Program monitor
+/// shows. Add Marker (M) on such a frame opens it here instead of stacking a second marker on it,
+/// as Premiere does; of coincident markers the first in the list wins.
+pub fn at_playhead(app: &FilmcraftApp, source: bool) -> Option<(Marker, Owner)> {
+    let owner = Owner::current(app, source)?;
+    let (_, rate, _, markers) = owner.details(app)?;
+    let playhead = if source { app.session.state.source_playhead } else { app.session.playhead() };
+    let frame = rate.frame_at(playhead);
+    markers.into_iter().find(|m| rate.frame_at(m.start) == frame).map(|m| (m, owner))
+}
 pub fn open_owned(app: &mut FilmcraftApp, marker: &Marker, owner: Owner) {
     let Some((_, rate, drop, _)) = owner.details(app) else { return };
     let format = |ticks| filmcraft_time::format_time(ticks, rate, drop, filmcraft_time::TimeDisplay::Timecode, 48000).replace(';', ":");

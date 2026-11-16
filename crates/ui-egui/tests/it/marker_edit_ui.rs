@@ -180,3 +180,51 @@ fn marker_menu_title_falls_back_and_skips_an_empty_comment() {
     assert_eq!(d.element_label("timeline.markerMenu.title").as_deref(), Some("Marker"));
     assert!(!d.has_element("timeline.markerMenu.comment"));
 }
+
+/// M on a frame that already has a marker opens that marker's dialog instead of stacking a second
+/// marker on it; one frame later M adds again, and callers that name a time (or automation through
+/// `engine.execute`) still add.
+#[test]
+fn m_on_a_marked_frame_opens_that_marker_instead_of_adding_another() {
+    let mut d = Driver::demo();
+    d.exec("markers.clearAll", json!({}));
+    d.ok("ui.set", json!({"focused": "Timeline"}));
+    d.exec("playhead.set", json!({"frame": 30}));
+    d.frames(2);
+    let count = |d: &Driver| d.harness.state().session.active_sequence().unwrap().markers.len();
+    d.ok("ui.key", json!({"key": "M"}));
+    d.frames(3);
+    assert_eq!(count(&d), 1, "M on an empty frame adds a marker");
+    assert!(d.harness.state().ui.marker_properties.is_none());
+    let id = d.harness.state().session.active_sequence().unwrap().markers[0].id.0;
+    let history = d.harness.state().session.history.undo.len();
+
+    d.ok("ui.key", json!({"key": "M"}));
+    d.frames(3);
+    assert_eq!(count(&d), 1, "M on the marker's frame must not add another");
+    assert_eq!(d.harness.state().session.history.undo.len(), history);
+    assert_eq!(d.harness.state().ui.marker_properties.as_ref().map(|m| m.marker), Some(id));
+    assert!(d.has_element("markerProperties.cancel"));
+    d.click("markerProperties.cancel", 1);
+    assert!(d.harness.state().ui.marker_properties.is_none());
+
+    // the menu item is the same command
+    assert_eq!(d.ok("ui.menu.invoke", json!({"id": "markers.add"}))["dialog"], "markerProperties");
+    assert_eq!(count(&d), 1);
+    d.click("markerProperties.cancel", 1);
+
+    d.exec("playhead.set", json!({"frame": 31}));
+    d.frames(2);
+    d.ok("ui.key", json!({"key": "M"}));
+    d.frames(3);
+    assert_eq!(count(&d), 2, "M one frame later adds");
+    assert!(d.harness.state().ui.marker_properties.is_none());
+
+    d.exec("playhead.set", json!({"frame": 30}));
+    d.exec("markers.add", json!({}));
+    assert_eq!(count(&d), 3, "automation through engine.execute still adds");
+    d.ok("ui.menu.invoke", json!({"id": "markers.add", "params": {"name": "Named"}}));
+    d.frames(2);
+    assert_eq!(count(&d), 4, "a caller that names a field still adds");
+    assert!(d.harness.state().ui.marker_properties.is_none());
+}

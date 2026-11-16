@@ -193,7 +193,29 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
     if text_field_window(ctx).is_some() && edits_text(id) {
         return activate_native(app, ctx, id);
     }
+    if let Some(marker) = edit_marker_at_playhead(app, id, &params) {
+        return Ok(json!({"dialog": "markerProperties", "marker": marker}));
+    }
     invoke_command(app, ctx, id, params)
+}
+
+/// Add Marker from the keyboard (M), the menu or a monitor button on a frame that already has a
+/// marker opens that marker's Marker dialog instead of adding another on top of it. Only the bare
+/// command does this: a caller that names a time, name or other field still adds a marker, and
+/// automation through `engine.execute` (`invoke_command`) is unchanged.
+fn edit_marker_at_playhead(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<u64> {
+    if id != "markers.add" || params.as_object().is_some_and(|o| o.keys().any(|k| !matches!(k.as_str(), "monitor" | "target"))) {
+        return None;
+    }
+    let source = match params.get("target").and_then(Value::as_str) {
+        Some("source") => true,
+        Some("program") => false,
+        Some(_) => return None,
+        None => targets_source(app, params),
+    };
+    let (marker, owner) = crate::panels::marker_properties::at_playhead(app, source)?;
+    crate::panels::marker_properties::open_owned(app, &marker, owner);
+    Some(marker.id.0)
 }
 
 pub(crate) fn menu_items_with_focus(app: &FilmcraftApp, ctx: &egui::Context) -> Vec<MenuItem> {

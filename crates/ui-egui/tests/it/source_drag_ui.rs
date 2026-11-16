@@ -273,6 +273,20 @@ fn source_marker_navigation_and_clear_shortcuts_leave_program_alone() {
     assert_eq!(h.state().session.playhead(), program_time);
     chord(&mut h, egui::Key::M, false, false);
     assert_eq!(filmcraft_engine::clip_ops::source_view(&h.state().session, filmcraft_engine::project::ItemId(5)).unwrap().markers.len(), 1);
+    // M again on the same Source frame opens that marker's dialog instead of stacking another
+    chord(&mut h, egui::Key::M, false, false);
+    assert_eq!(filmcraft_engine::clip_ops::source_view(&h.state().session, filmcraft_engine::project::ItemId(5)).unwrap().markers.len(), 1);
+    let draft = h.state().ui.marker_properties.as_ref().expect("Marker dialog");
+    assert!(matches!(draft.owner, filmcraft_ui_egui::panels::marker_properties::Owner::Source(5)));
+    // close it as Cancel does: the dialog's Name field had keyboard focus and Source panel focus returns
+    h.state_mut().ui.marker_properties = None;
+    h.ctx.memory_mut(|m| {
+        if let Some(id) = m.focused() {
+            m.surrender_focus(id);
+        }
+    });
+    h.state_mut().ui.focused = PanelKind::Source;
+    step(&mut h);
     assert_eq!(h.state().session.active_sequence().unwrap(), &before);
     chord(&mut h, egui::Key::I, true, true);
     assert!(filmcraft_engine::clip_ops::source_view(&h.state().session, filmcraft_engine::project::ItemId(5)).unwrap().mark_in.is_none());
