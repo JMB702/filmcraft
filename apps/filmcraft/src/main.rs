@@ -35,6 +35,7 @@ mod control_server;
 #[cfg(target_os = "linux")]
 mod dev_icon;
 mod file_filters;
+mod first_frame;
 mod graphics;
 mod live;
 mod logging;
@@ -380,6 +381,21 @@ fn app_creator(
                 }
             }),
         );
+        // The window appears with its first frame; see first_frame.rs for a start that never got one.
+        if let Some(window) = cc.winit_window() {
+            let painted = Arc::new(AtomicBool::new(false));
+            let seen = Arc::clone(&painted);
+            cc.egui_ctx.on_end_pass("first-frame", Arc::new(move |_| seen.store(true, Ordering::Release)));
+            let window = Arc::downgrade(window);
+            first_frame::watch(painted, first_frame::Schedule::APP, move |nudge| {
+                let Some(window) = window.upgrade() else { return false };
+                match nudge {
+                    first_frame::Nudge::Redraw => window.request_redraw(),
+                    first_frame::Nudge::Show => window.set_visible(true),
+                }
+                true
+            });
+        }
         let mut session = Session::default();
         if let Some(dir) = data_dir.clone().or_else(default_data_dir) {
             let mut cfg = AutosaveConfig::new(dir);

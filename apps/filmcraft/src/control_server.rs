@@ -216,7 +216,14 @@ fn serve_with_timeout<S: Stream>(
     timeout: Duration,
     ready: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
-    stream.set_timeouts(timeout)?;
+    match stream.set_timeouts(timeout) {
+        Ok(()) => {}
+        // macOS refuses socket options (EINVAL) once the peer has hung up. `filmcraft-cli`
+        // checks that the live channel answers by connecting and closing at once: nothing to
+        // serve, and nothing to warn about.
+        Err(e) if peer_gone(&e) => return Ok(()),
+        Err(e) => return Err(e),
+    }
     let read = stream.try_clone_stream()?;
     serve_lines(read, stream, token, |method, params| {
         // Until the app can drain the queue, a request would outlive its 60 s reply wait and
@@ -230,6 +237,12 @@ fn serve_with_timeout<S: Stream>(
         Some(rrx.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|_| json!({"ok": false, "error": "timeout"})))
     });
     Ok(())
+}
+
+/// The system's EINVAL from a socket option: on macOS, the socket's peer has already closed.
+/// (Rust's own checks, such as a zero timeout, report `InvalidInput` with no OS error.)
+fn peer_gone(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::InvalidInput && e.raw_os_error().is_some()
 }
 
 /// One parsed line.

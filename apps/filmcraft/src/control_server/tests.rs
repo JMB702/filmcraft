@@ -378,3 +378,18 @@ fn authenticated_tcp_request_reaches_the_ui_queue() {
     server.join().unwrap();
     assert_eq!(serde_json::from_str::<Value>(&reply).unwrap(), json!({"id": 7, "ok": true}));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_probe_that_hangs_up_at_once_is_not_an_error() {
+    // `filmcraft-cli` checks the live channel answers by connecting and closing at once; on macOS
+    // the socket options then fail with EINVAL, which was logged as a warning on every check.
+    let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(client);
+    let (tx, rx) = channel();
+    let ctx = egui::Context::default();
+    let served = serve_with_timeout(server, &tx, &ctx, TOKEN, Duration::from_secs(5), Arc::new(AtomicBool::new(true)));
+    assert!(served.is_ok(), "{served:?}");
+    assert!(rx.try_recv().is_err(), "nothing was asked");
+    assert!(!peer_gone(&std::io::Error::new(std::io::ErrorKind::InvalidInput, "zero timeout")));
+}
