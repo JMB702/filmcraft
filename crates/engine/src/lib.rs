@@ -52,6 +52,7 @@ pub mod relink;
 pub mod relink_auto;
 pub mod relink_cloud;
 pub mod remix;
+pub mod review;
 pub mod scene_detect;
 pub mod scopes;
 pub mod sequence_extras;
@@ -553,6 +554,8 @@ pub enum Event {
     OpenSource(ItemId),
     /// Show this item in the Project panel (Reveal in Project).
     RevealInProject(ItemId),
+    /// Put this text on the clipboard (a review link from `review.share`).
+    CopyText(String),
 }
 
 pub struct Session {
@@ -641,6 +644,8 @@ pub struct Session {
     pub disk: disk_watch::DiskTracker,
     /// The open undo group of a live-channel run (`history.groupBegin`).
     pub history_group: disk_watch::HistoryGroup,
+    /// Review links: the Review folder, the server launcher and renders in progress ([`review`]).
+    pub review: review::ReviewRuntime,
 }
 
 /// An export advanced a batch at a time on the host's thread ([`Session::pump_jobs`]).
@@ -739,6 +744,7 @@ impl Session {
             relink_auto: Default::default(),
             disk: Default::default(),
             history_group: Default::default(),
+            review: Default::default(),
         }
     }
 
@@ -828,6 +834,7 @@ impl Session {
         masks::poll(self);
         scene_detect::poll(self);
         export_tools::pump_queue(self, false);
+        review::poll(self);
         panels::log_jobs(self);
         let Some(p) = self.persistence.as_mut() else { return };
         // failed auto-saves in a row before these events (the drain below counts them into the status)
@@ -1570,6 +1577,8 @@ mod relink_auto_tests;
 mod relink_tests;
 #[cfg(test)]
 mod remix_tests;
+#[cfg(test)]
+mod review_tests;
 #[cfg(test)]
 mod ripple_delete_tests;
 #[cfg(test)]

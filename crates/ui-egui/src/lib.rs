@@ -266,6 +266,10 @@ pub struct FilmcraftApp {
     /// `Some(None)` once starting it failed.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) disk_waker: Option<Option<app::disk_watch::FileWaker>>,
+    /// Wakes the window when a review comment arrives (`app/review.rs`); `Some(None)` once
+    /// starting it failed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) review_waker: Option<Option<app::disk_watch::FileWaker>>,
     /// Modifiers owned by an in-flight control gesture, carried between its input frames.
     synthetic_modifiers: egui::Modifiers,
     /// Requests waiting for the UI to show an element: (request, give-up time).

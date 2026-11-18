@@ -43,6 +43,7 @@ mod logging;
 mod native_color;
 #[cfg(target_os = "macos")]
 mod native_menu;
+mod review_host;
 mod window_raise;
 
 use args::{Cli, Launch};
@@ -99,6 +100,10 @@ fn main() -> eframe::Result {
         options.wgpu_options.wgpu_setup
     };
     if let Some(code) = graphics::probe::child_main(&args, test_setup) {
+        std::process::exit(code);
+    }
+    // The review server (review links) is this program started with `--review-server <folder>`.
+    if let Some(code) = review_host::child_main(&args) {
         std::process::exit(code);
     }
     // First, so the panic hook and every start-up record are logged (`logging`).
@@ -398,6 +403,7 @@ fn app_creator(
         }
         let mut session = Session::default();
         if let Some(dir) = data_dir.clone().or_else(default_data_dir) {
+            review_host::install(&mut session, &dir);
             let mut cfg = AutosaveConfig::new(dir);
             cfg.local_offset = local_offset;
             if let Err(e) = session.start_autosave(cfg) {

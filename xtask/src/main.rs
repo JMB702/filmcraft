@@ -4,6 +4,8 @@
 //!   listed same-layer edges, L0 codec crates depend on `bitstream` only, no UI/OS crates below L5).
 //! - `wasm`: `cargo check --target wasm32-unknown-unknown` for every crate in L0–L4, the egui UI
 //!   and the web app.
+//! - `review-web [--dev]`: build the review-link page's wasm into `<target>/review-web`
+//!   (docs/review-links.md).
 //! - `web [--dev] [--serve PORT]`: build the web app (`apps/filmcraft-web`) into
 //!   `<target>/web/dist` with `wasm-bindgen` (docs/web.md); `--serve` serves it on localhost.
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
@@ -51,6 +53,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("project", 1),
     ("audio-dsp", 1),
     ("text", 1),
+    ("review", 1),
     ("edit", 2),
     ("codecs", 2),
     ("keyframe", 2),
@@ -75,6 +78,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("filmcraft", 6),
     ("cli", 6),
     ("web", 6),
+    ("review-web", 6),
 ];
 
 /// L0 crates that are not codecs/containers (no `bitstream`-only restriction).
@@ -242,7 +246,7 @@ fn run(cmd: &mut Command) -> Result<(), String> {
 }
 
 /// Crates above L4 that must also build for the web.
-const WEB_CRATES: &[&str] = &["filmcraft-ui-egui", "filmcraft-web"];
+const WEB_CRATES: &[&str] = &["filmcraft-ui-egui", "filmcraft-web", "filmcraft-review-web"];
 
 fn wasm() -> Result<(), String> {
     let md = metadata()?;
@@ -333,6 +337,51 @@ fn web(args: &[String]) -> Result<(), String> {
     if let Some(port) = serve {
         serve_dir(&dist, port)?;
     }
+    Ok(())
+}
+
+/// Build the review-link page's wasm (`apps/filmcraft-review-web`) into `<target>/review-web`
+/// (`review_web.js` + `review_web_bg.wasm` from wasm-bindgen). Point `FILMCRAFT_REVIEW_WEB_DIR` at
+/// it and rebuild FilmCraft to serve the scripted page. The server also needs `boot.js`, the one
+/// call that starts the module; it is copied from `apps/filmcraft-review-web/web/` when present
+/// (docs/review-links.md). Without it the page stays the server's no-script page.
+fn review_web(args: &[String]) -> Result<(), String> {
+    let dev = args.iter().any(|a| a == "--dev");
+    let profile = if dev { "dev" } else { "release" };
+    run(Command::new(env!("CARGO")).args(["build", "--target", "wasm32-unknown-unknown", "-p", "filmcraft-review-web", "--profile", profile]))?;
+    let out = Command::new("wasm-bindgen")
+        .arg("--version")
+        .output()
+        .map_err(|_| format!("wasm-bindgen CLI not found: cargo install wasm-bindgen-cli --version {WASM_BINDGEN} --locked"))?;
+    if !String::from_utf8_lossy(&out.stdout).contains(WASM_BINDGEN) {
+        return Err(format!("the wasm-bindgen CLI must be {WASM_BINDGEN}: cargo install wasm-bindgen-cli --version {WASM_BINDGEN} --locked"));
+    }
+    let dir = if dev { "debug" } else { "release" };
+    let wasm = target_dir().join("wasm32-unknown-unknown").join(dir).join("filmcraft_review_web.wasm");
+    let dist = target_dir().join("review-web");
+    let _ = std::fs::remove_dir_all(&dist);
+    std::fs::create_dir_all(&dist).map_err(|e| e.to_string())?;
+    run(Command::new("wasm-bindgen").args(["--target", "web", "--no-typescript", "--out-name", "review_web", "--out-dir"]).arg(&dist).arg(&wasm))?;
+    let bg = dist.join("review_web_bg.wasm");
+    if !dev && Command::new("wasm-opt").arg("--version").output().is_ok() {
+        let opt = dist.join("review_web_opt.wasm");
+        run(Command::new("wasm-opt")
+            .args(["-Oz", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-mutable-globals"])
+            .arg(&bg)
+            .arg("-o")
+            .arg(&opt))?;
+        std::fs::rename(&opt, &bg).map_err(|e| e.to_string())?;
+    }
+    let boot = std::path::Path::new("apps/filmcraft-review-web/web/boot.js");
+    if boot.is_file() {
+        std::fs::copy(boot, dist.join("boot.js")).map_err(|e| format!("boot.js: {e}"))?;
+    } else {
+        eprintln!("review-web: no apps/filmcraft-review-web/web/boot.js; the server will keep serving the no-script page");
+    }
+    let size = std::fs::metadata(&bg).map(|m| m.len()).unwrap_or(0);
+    let abs = std::fs::canonicalize(&dist).unwrap_or_else(|_| dist.clone());
+    println!("review-web: {} ({:.0} KB wasm)", abs.display(), size as f64 / 1e3);
+    println!("serve it: FILMCRAFT_REVIEW_WEB_DIR={} cargo build -p filmcraft", abs.display());
     Ok(())
 }
 
@@ -570,6 +619,7 @@ fn main() -> ExitCode {
         "bench" => bench(),
         "bench-playback" => bench_playback(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "review-web" => review_web(&std::env::args().skip(2).collect::<Vec<_>>()),
         "version" => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             version::run(&root(), &rest.iter().map(String::as_str).collect::<Vec<_>>())
@@ -583,7 +633,7 @@ fn main() -> ExitCode {
             ico::run(&rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
         _ => Err(
-            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci|bench [args]|bench-playback [args]>"
+            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|review-web [--dev]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci|bench [args]|bench-playback [args]>"
                 .into(),
         ),
     };

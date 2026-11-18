@@ -1,0 +1,135 @@
+/* FilmCraft review page. Phone first: one column, 44 px targets, safe areas, the composer above
+   the on-screen keyboard (--kb is set by the page's wasm from visualViewport), no sideways scroll. */
+:root {
+  --bg: #101113;
+  --panel: #18191c;
+  --line: #2a2c31;
+  --text: #ececee;
+  --dim: #9a9ca3;
+  --accent: #4f8cff;
+  --mark: #36b3e8;
+  --danger: #ff7a6b;
+  --kb: 0px;
+  --compose-h: 76px;
+  color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); overflow-x: hidden; }
+body {
+  font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  min-height: 100dvh;
+  padding-bottom: calc(var(--compose-h) + env(safe-area-inset-bottom));
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+[hidden] { display: none !important; }
+html:not(.wasm) .js { display: none !important; }
+html.wasm .nojs { display: none !important; }
+button { font: inherit; color: inherit; }
+
+.top {
+  display: flex; align-items: center; gap: 12px;
+  padding: calc(10px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) 10px calc(16px + env(safe-area-inset-left));
+}
+.title { min-width: 0; flex: 1; }
+.top h1 { margin: 0; font-size: 17px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sub { margin: 2px 0 0; color: var(--dim); font-size: 13px; }
+.chip {
+  min-width: 44px; min-height: 44px; padding: 0 12px; border-radius: 22px;
+  border: 1px solid var(--line); background: var(--panel); font-size: 13px; font-weight: 600; letter-spacing: .04em;
+}
+
+/* The player stays in view while comments scroll under it. */
+.stage { position: sticky; top: 0; z-index: 5; background: #000; }
+.stage video { display: block; width: 100%; height: auto; max-height: 62dvh; background: #000; }
+@media (orientation: landscape) and (max-height: 500px) {
+  .stage video { max-height: 100dvh; }
+  .top { display: none; }
+}
+
+.tools {
+  display: grid; grid-template-columns: 64px 1fr 64px; align-items: center; gap: 8px;
+  padding: 8px calc(12px + env(safe-area-inset-right)) 4px calc(12px + env(safe-area-inset-left));
+}
+.step {
+  min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel);
+  font-size: 15px; font-weight: 600; touch-action: manipulation;
+}
+.step:active { background: var(--line); }
+.tc { text-align: center; font: 600 20px/1 ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+
+/* Scrub bar with a tick per comment. The hit area is 44 px tall; the track is drawn thin. */
+.scrub { padding: 0 calc(16px + env(safe-area-inset-right)) 6px calc(16px + env(safe-area-inset-left)); touch-action: none; }
+.track { position: relative; height: 44px; cursor: pointer; }
+.track::before { content: ""; position: absolute; left: 0; right: 0; top: 20px; height: 4px; border-radius: 2px; background: var(--line); }
+.fill { position: absolute; left: 0; top: 20px; height: 4px; width: 0; border-radius: 2px; background: var(--accent); }
+.head { position: absolute; top: 13px; width: 18px; height: 18px; margin-left: -9px; left: 0; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px #0008; pointer-events: none; }
+.ticks { position: absolute; inset: 0; pointer-events: none; }
+.tick { position: absolute; top: 6px; width: 3px; height: 12px; margin-left: -1.5px; border-radius: 2px; background: var(--mark); }
+.tick.mine { background: #f2c94c; }
+
+.feed { padding: 4px calc(16px + env(safe-area-inset-right)) 16px calc(16px + env(safe-area-inset-left)); }
+.list { list-style: none; margin: 0; padding: 0; }
+.c { padding: 12px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 45vw; }
+.c.on { background: linear-gradient(90deg, #4f8cff22, transparent); }
+.c-h { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.who { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.at { margin-left: auto; color: var(--mark); font: 600 14px/1 ui-monospace, "SF Mono", Menlo, monospace; text-decoration: none; padding: 14px 0 14px 12px; margin-top: -14px; margin-bottom: -14px; white-space: nowrap; }
+.txt { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.c-a { display: flex; gap: 8px; margin-top: 6px; }
+.c-a button { min-height: 44px; padding: 0 12px; border: 0; background: none; color: var(--dim); font-size: 14px; }
+.c-a .del { color: var(--danger); }
+.empty { color: var(--dim); text-align: center; padding: 28px 0; margin: 0; }
+
+/* The composer is fixed to the bottom and rides above the on-screen keyboard. */
+.composer {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+  transform: translateY(calc(-1 * var(--kb)));
+  padding: 8px calc(12px + env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+  background: rgba(16, 17, 19, .96); border-top: 1px solid var(--line);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+}
+.composer > * + * { margin-top: 8px; }
+.row { display: flex; align-items: flex-end; gap: 8px; }
+.in {
+  width: 100%; min-height: 44px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text); font: inherit; font-size: 16px; /* 16 px: iOS does not zoom */
+}
+.in:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.txtin { flex: 1; min-width: 0; resize: none; max-height: 30dvh; line-height: 1.35; }
+.send {
+  min-width: 64px; min-height: 44px; padding: 0 16px; border: 0; border-radius: 12px;
+  background: var(--accent); color: #fff; font-weight: 600; touch-action: manipulation;
+}
+.send:disabled { opacity: .5; }
+.at-chip {
+  min-height: 44px; padding: 0 10px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel);
+  color: var(--mark); font: 600 13px/1 ui-monospace, "SF Mono", Menlo, monospace; white-space: nowrap; flex: none;
+}
+.status { margin: 0; min-height: 0; color: var(--dim); font-size: 13px; }
+.status:empty { display: none; }
+.status.err { color: var(--danger); }
+html.wasm .namerow.known { display: none; }
+
+.sheet {
+  width: min(420px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 16px;
+  background: var(--panel); color: var(--text); padding: 20px;
+}
+.sheet::backdrop { background: #000a; }
+.sheet h2 { margin: 0 0 4px; font-size: 19px; }
+.sheet .in { margin-top: 14px; }
+.sheet-b { display: flex; justify-content: flex-end; margin-top: 14px; }
+
+.wait { padding: 48px 16px; text-align: center; }
+.spinner { width: 36px; height: 36px; margin: 0 auto 12px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* Wider screens: the same column, centred. */
+@media (min-width: 900px) {
+  .top, .tools, .scrub, .feed { max-width: 960px; margin-left: auto; margin-right: auto; }
+  .stage video { max-height: 70vh; }
+  .composer { left: 50%; right: auto; width: min(960px, 100vw); transform: translate(-50%, calc(-1 * var(--kb))); border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+}

@@ -1,0 +1,62 @@
+[package]
+name = "filmcraft-review-web"
+description = "The review-link page's behaviour (wasm32): frame stepping, comment scrub bar, live comments, keyboard-following composer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The page logic (`logic`) builds and is tested on every target; the DOM glue is wasm32-only.
+# Build the page with `cargo xtask review-web` (docs/review-links.md).
+[dependencies]
+filmcraft-review = { workspace = true }
+filmcraft-time = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Crypto",
+    "CssStyleDeclaration",
+    "Document",
+    "DomRect",
+    "DomTokenList",
+    "Element",
+    "Event",
+    "EventSource",
+    "EventTarget",
+    "Headers",
+    "HtmlButtonElement",
+    "HtmlDialogElement",
+    "HtmlElement",
+    "HtmlFormElement",
+    "HtmlInputElement",
+    "HtmlMediaElement",
+    "HtmlTextAreaElement",
+    "HtmlVideoElement",
+    "KeyboardEvent",
+    "Location",
+    "MessageEvent",
+    "MouseEvent",
+    "Navigator",
+    "Node",
+    "NodeList",
+    "PointerEvent",
+    "Request",
+    "RequestInit",
+    "Response",
+    "ScrollIntoViewOptions",
+    "ScrollLogicalPosition",
+    "Storage",
+    "VisualViewport",
+    "Window",
+] }
