@@ -3146,6 +3146,15 @@ fn build() -> Vec<CommandSpec> {
             always,
             crate::review::config
         ),
+        cmd!(
+            "review.funnel",
+            "Review Links Through Tailscale Funnel",
+            [],
+            None,
+            r#"{"socket":str?,"use":bool?} (read-only Tailscale status and the setup steps; use: point links at the Funnel address)"#,
+            always,
+            crate::review::funnel
+        ),
         cmd!("colors.addCustom", "Add Custom Color", [], None, r#"{"color":hex,"name":str?}"#, always, crate::palette::add),
         cmd!(
             "markers.add",

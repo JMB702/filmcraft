@@ -342,9 +342,8 @@ fn web(args: &[String]) -> Result<(), String> {
 
 /// Build the review-link page's wasm (`apps/filmcraft-review-web`) into `<target>/review-web`
 /// (`review_web.js` + `review_web_bg.wasm` from wasm-bindgen). Point `FILMCRAFT_REVIEW_WEB_DIR` at
-/// it and rebuild FilmCraft to serve the scripted page. The server also needs `boot.js`, the one
-/// call that starts the module; it is copied from `apps/filmcraft-review-web/web/` when present
-/// (docs/review-links.md). Without it the page stays the server's no-script page.
+/// it and rebuild FilmCraft to serve the scripted page; the server's page starts the module with
+/// its one bootstrap line (docs/review-links.md).
 fn review_web(args: &[String]) -> Result<(), String> {
     let dev = args.iter().any(|a| a == "--dev");
     let profile = if dev { "dev" } else { "release" };
@@ -371,12 +370,6 @@ fn review_web(args: &[String]) -> Result<(), String> {
             .arg("-o")
             .arg(&opt))?;
         std::fs::rename(&opt, &bg).map_err(|e| e.to_string())?;
-    }
-    let boot = std::path::Path::new("apps/filmcraft-review-web/web/boot.js");
-    if boot.is_file() {
-        std::fs::copy(boot, dist.join("boot.js")).map_err(|e| format!("boot.js: {e}"))?;
-    } else {
-        eprintln!("review-web: no apps/filmcraft-review-web/web/boot.js; the server will keep serving the no-script page");
     }
     let size = std::fs::metadata(&bg).map(|m| m.len()).unwrap_or(0);
     let abs = std::fs::canonicalize(&dist).unwrap_or_else(|_| dist.clone());

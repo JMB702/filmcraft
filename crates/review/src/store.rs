@@ -47,11 +47,13 @@ pub struct ReviewConfig {
     pub public_base_url: String,
     /// Days until a new link expires (0: never).
     pub expire_days: u32,
+    /// The tailscaled socket `review.funnel` asks (empty: Tailscale's default).
+    pub tailscale_socket: String,
 }
 
 impl Default for ReviewConfig {
     fn default() -> Self {
-        Self { port: 8787, bind: Bind::Lan, public_base_url: String::new(), expire_days: 30 }
+        Self { port: 8787, bind: Bind::Lan, public_base_url: String::new(), expire_days: 30, tailscale_socket: String::new() }
     }
 }
 

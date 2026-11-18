@@ -37,7 +37,7 @@ Under `<data dir>/Review/` (folders 0700, files 0600):
 
 | Path | What |
 |---|---|
-| `config.json` | `port` (8787), `bind` (`lan` or `local`), `publicBaseUrl`, `expireDays` (30) |
+| `config.json` | `port` (8787), `bind` (`lan` or `local`), `publicBaseUrl`, `expireDays` (30), `tailscaleSocket` |
 | `server.json`, `server.log` | the running server's pid and port; its log |
 | `notify` | rewritten by the server after each comment, watched by the app |
 | `shares/<id>/share.json` | the share: token, project path, sequence id, frame rate, start timecode, range, expiry, revoked |
@@ -54,6 +54,7 @@ Under `<data dir>/Review/` (folders 0700, files 0600):
 | `review.revoke` | `{"share"}` | the link stops working at once |
 | `review.sync` | `{}` | apply waiting comments now (the app also does this by itself) |
 | `review.config` | `{"port", "bind", "publicBaseUrl", "expireDays"}` | settings; returns `linkBase` |
+| `review.funnel` | `{"socket"?, "use"?}` | Tailscale Funnel status and the steps still to do (read-only); `use: true` points links at the Funnel address |
 
 The project must be saved first (comments are matched to it by path).
 
@@ -84,8 +85,8 @@ neighbour, and has one-frame steps. See `crates/review/src/timing.rs`.
   (96, 16 per address; 64 live streams, 6 per address), and writes are rate limited per address.
 - A device secret, kept in the reviewer's browser, is stored only as a SHA-256 hash: only the
   device that wrote a comment can edit or delete it.
-- Strict headers: a CSP with no inline script, `no-referrer`, `nosniff`, `DENY` framing,
-  `noindex`.
+- Strict headers: a CSP whose only inline script is the bootstrap line, allowed by its hash;
+  `no-referrer`, `nosniff`, `DENY` framing, `noindex`.
 
 ### Reaching people off the network
 
@@ -95,6 +96,20 @@ tunnel you run yourself in front of the port (for example Tailscale Funnel or Cl
 and set `publicBaseUrl` to its address. FilmCraft does not open ports or set up tunnels. Behind a
 tunnel on this machine the server takes the client address from `X-Forwarded-For` /
 `CF-Connecting-IP` for rate limits, and only when the connection comes from loopback.
+
+**Tailscale Funnel.** `review.funnel` reads `tailscale status --json` and
+`tailscale funnel status --json` (nothing else: it never signs in, turns Funnel on or changes the
+tailnet) and returns the state, this machine's `*.ts.net` name, whether the tailnet allows Funnel
+and HTTPS certificates, which public port (if any) forwards to the review server, and `steps`:
+the commands still to run, in order. A typical first run:
+
+1. Sign in to Tailscale and, in the admin console, turn on MagicDNS and HTTPS Certificates and
+   give the machine the `funnel` node attribute.
+2. `tailscale funnel --bg <port>` (or `--https=8443` / `--https=10000` when 443 is taken).
+3. `review.funnel {"use": true}`: links now start `https://<machine>.<tailnet>.ts.net[:port]`.
+
+`socket` points the command at a tailscaled that runs on its own socket
+(`tailscale --socket=<path>`). The reply's `stop` is the command that turns that Funnel port off.
 
 ## The page
 
@@ -110,9 +125,15 @@ FILMCRAFT_REVIEW_WEB_DIR=$PWD/target/review-web cargo build -p filmcraft
 ```
 
 `FILMCRAFT_REVIEW_WEB_DIR` is an optional build input, like `CRAFT_FONTS_DIR`: the review server
-embeds `boot.js`, `review_web.js` and `review_web_bg.wasm` from it. Unset, or missing any of the
-three, the server serves the no-script page. `boot.js` is the one call that starts the
-wasm-bindgen module; the browser cannot start a wasm module without it.
+embeds `review_web.js` (wasm-bindgen's generated glue) and `review_web_bg.wasm` from it. Unset,
+or missing either, the server serves the no-script page.
+
+**The one line of JavaScript.** A browser cannot start a wasm module without a script call, so the
+page carries exactly one inline line, `import init from "/assets/review_web.js?v=…"; init();`
+(`page::boot_script`). It is a reviewed exception to "no handwritten JavaScript in native Craft
+apps" (decided for this feature); everything else on the page is Rust or generated glue. The
+page's Content-Security-Policy allows that line by its SHA-256 hash, so no other inline script can
+run.
 
 ## Testing
 

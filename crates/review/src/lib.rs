@@ -10,6 +10,8 @@
 //!   comment log, the app's ledger of applied comments).
 //! - [`server`] (feature `server`): the HTTP server reviewers reach. It runs in its own process
 //!   (`filmcraft --review-server`) so comments are taken while FilmCraft is closed.
+//! - [`tunnel`] (feature `server`): read-only Tailscale Funnel status, for links that reach
+//!   reviewers off the local network.
 //!
 //! The server never touches a project or the live control channel: it only appends to the comment
 //! log. The app reads the log and makes the markers (`review.sync` in the engine).
@@ -25,5 +27,7 @@ pub mod token;
 pub mod server;
 #[cfg(feature = "server")]
 pub mod store;
+#[cfg(feature = "server")]
+pub mod tunnel;
 
 pub use model::{Comment, CommentEvent, EventKind, Rendition, ShareInfo, ShareRecord};

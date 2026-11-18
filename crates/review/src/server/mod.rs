@@ -373,8 +373,10 @@ fn route(req: &Request, w: &mut TcpStream, peer: SocketAddr, state: &State) -> i
     }
 }
 
-fn boot_asset() -> Option<String> {
-    web::WEB.iter().find(|(n, _)| *n == "boot.js").map(|(_, b)| format!("/assets/boot.js?v={}", page::version_tag(b)))
+/// The glue's versioned URL, when the wasm assets are built in.
+fn glue_asset() -> Option<String> {
+    let has_wasm = web::WEB.iter().any(|(n, _)| *n == "review_web_bg.wasm");
+    web::WEB.iter().find(|(n, _)| *n == "review_web.js").filter(|_| has_wasm).map(|(_, b)| format!("/assets/review_web.js?v={}", page::version_tag(b)))
 }
 
 fn asset(w: &mut TcpStream, req: &Request, name: &str) -> io::Result<bool> {
@@ -424,13 +426,17 @@ fn info(state: &State, share: &ShareRecord) -> ShareInfo {
 fn page(w: &mut TcpStream, req: &Request, state: &State, share: &ShareRecord) -> io::Result<bool> {
     let comments = fold(&state.dir.read_events(&share.id).unwrap_or_default());
     let ready: Vec<String> = ready(state, share).into_iter().map(|r| r.name).collect();
-    let boot = boot_asset();
-    let html = page::render(&page::PageInput { share, comments: &comments, ready: &ready, boot: boot.as_deref() });
+    let glue = glue_asset();
+    let html = page::render(&page::PageInput { share, comments: &comments, ready: &ready, glue: glue.as_deref() });
+    let csp = match glue.as_deref() {
+        Some(g) if !ready.is_empty() => http::csp_with_script(&page::boot_script(g)),
+        _ => http::CSP.to_string(),
+    };
     http::respond(
         w,
         200,
         "text/html; charset=utf-8",
-        &[("Content-Security-Policy", http::CSP.into()), ("Cache-Control", "no-store".into())],
+        &[("Content-Security-Policy", csp), ("Cache-Control", "no-store".into())],
         html.as_bytes(),
         req.method == "HEAD",
         false,

@@ -428,11 +428,11 @@ fn wire_video(app: &Shared) {
                 if play {
                     let _ = a.els.video.play();
                 }
-            } else if let Some(id) = a.focus.take() {
-                if let Some(f) = a.comments.iter().find(|c| c.id == id).map(|c| c.frame) {
-                    a.seek(f);
-                    a.highlight(&id);
-                }
+            } else if let Some(id) = a.focus.take()
+                && let Some(f) = a.comments.iter().find(|c| c.id == id).map(|c| c.frame)
+            {
+                a.seek(f);
+                a.highlight(&id);
             }
             a.shown = -1;
             a.draw();
@@ -751,10 +751,10 @@ fn animate(app: Shared) {
             a.draw();
             a.win.clone()
         });
-        if let (Some(win), Ok(c)) = (win, again.try_borrow()) {
-            if let Some(c) = c.as_ref() {
-                let _ = win.request_animation_frame(c.as_ref().unchecked_ref());
-            }
+        if let (Some(win), Ok(c)) = (win, again.try_borrow())
+            && let Some(c) = c.as_ref()
+        {
+            let _ = win.request_animation_frame(c.as_ref().unchecked_ref());
         }
     });
     if let Some(win) = web_sys::window() {

@@ -28,12 +28,17 @@ const CMD: &str = "review.share";
 /// app, which knows its own executable.
 pub type Launcher = Arc<dyn Fn(&ReviewDir) -> std::result::Result<(), String> + Send + Sync>;
 
+/// Runs the read-only `tailscale status --json` and `tailscale funnel status --json` (with
+/// `--socket` when the argument is not empty). Installed by the desktop app.
+pub type TunnelProbe = Arc<dyn Fn(&str) -> filmcraft_review::tunnel::ProbeOutput + Send + Sync>;
+
 /// Review-link state of a session.
 #[derive(Default)]
 pub struct ReviewRuntime {
     /// `<data dir>/Review` (None: review links are off, e.g. in the browser build).
     pub dir: Option<ReviewDir>,
     pub launcher: Option<Launcher>,
+    pub tunnel: Option<TunnelProbe>,
     /// Renders still to make, one at a time.
     renders: Vec<PendingRender>,
     /// Events applied in this session whose ledger could not be written yet.
@@ -494,6 +499,66 @@ pub fn config(s: &mut Session, p: &Value) -> Result<Value> {
         "folder": path_str(d.root()),
         "changed": changed,
         "note": if changed { "a running server keeps its port and bind until it restarts" } else { "" },
+    }))
+}
+
+fn socket_path(v: &str) -> std::result::Result<String, String> {
+    let v = v.trim();
+    if v.is_empty() {
+        return Ok(String::new());
+    }
+    if v.len() > 300 || !v.starts_with('/') || v.chars().any(char::is_control) {
+        return Err("socket: an absolute path to a tailscaled socket, or \"\" for Tailscale's default".into());
+    }
+    Ok(v.to_string())
+}
+
+/// `review.funnel`: whether reviewers off this network can reach the links through Tailscale
+/// Funnel, and the steps still to do. Read-only towards Tailscale: it never signs in, turns Funnel
+/// on or changes the tailnet. `socket` sets the tailscaled socket to ask; `use: true` sets
+/// `publicBaseUrl` to the Funnel address once Funnel forwards to the review server.
+pub fn funnel(s: &mut Session, p: &Value) -> Result<Value> {
+    use filmcraft_review::tunnel;
+    let cmd = "review.funnel";
+    let d = dir(s, cmd)?;
+    let probe = s.review.tunnel.clone().ok_or_else(|| bad(cmd, "Tailscale status is not available in this build"))?;
+    let mut cfg = d.config();
+    let mut changed = false;
+    if let Some(sock) = str_p(p, "socket") {
+        cfg.tailscale_socket = socket_path(sock).map_err(|e| bad(cmd, e))?;
+        changed = true;
+    }
+    let out = probe(&cfg.tailscale_socket);
+    let st = tunnel::read(&out, cfg.port);
+    if bool_p(p, "use") == Some(true) {
+        let base = st.base_url().ok_or_else(|| bad(cmd, "Funnel does not forward to the review server yet; do the steps first"))?;
+        cfg.public_base_url = base;
+        changed = true;
+    }
+    if changed {
+        d.save_config(&cfg).map_err(|e| bad(cmd, e.to_string()))?;
+    }
+    let steps = tunnel::steps(&st, cfg.port, &cfg.tailscale_socket, &cfg.public_base_url);
+    let funnel_base = st.base_url();
+    Ok(json!({
+        "tool": out.tool,
+        "state": st.state,
+        "dnsName": st.dns_name,
+        "httpsCertificates": st.https_certs,
+        "funnelAllowed": st.funnel_allowed,
+        "funnelPorts": st.funnel_ports,
+        "portsInUse": st.taken,
+        "serving": st.serving,
+        "tailnetOnly": st.tailnet_only,
+        "funnelBaseUrl": funnel_base,
+        "socket": cfg.tailscale_socket,
+        "port": cfg.port,
+        "publicBaseUrl": cfg.public_base_url,
+        "linkBase": link_base(&cfg),
+        "ready": steps.is_empty() && funnel_base.is_some(),
+        "steps": steps,
+        "changed": changed,
+        "stop": st.serving.map(|port| format!("{} funnel --https={port} off", tunnel::command(&cfg.tailscale_socket))),
     }))
 }
 

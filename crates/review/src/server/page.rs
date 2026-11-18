@@ -26,8 +26,15 @@ pub struct PageInput<'a> {
     pub comments: &'a [Comment],
     /// Ready renditions (names), smallest first.
     pub ready: &'a [String],
-    /// The `<script type="module">` source when the wasm assets are built in (`None`: no script).
-    pub boot: Option<&'a str>,
+    /// URL of the wasm-bindgen glue when the wasm assets are built in (`None`: no script).
+    pub glue: Option<&'a str>,
+}
+
+/// The page's only script: the one call that starts the wasm module. A browser cannot start a
+/// wasm module without it; everything else is Rust (a reviewed exception to "no handwritten
+/// JavaScript", see docs/review-links.md). The page's CSP allows exactly this text by its hash.
+pub fn boot_script(glue_url: &str) -> String {
+    format!("import init from \"{glue_url}\"; init();")
 }
 
 /// The page HTML.
@@ -55,8 +62,8 @@ pub fn render(p: &PageInput) -> String {
         h.push_str("<meta http-equiv=\"refresh\" content=\"8\">\n");
     }
     h.push_str(&format!("<title>{title} · Review</title>\n<link rel=\"stylesheet\" href=\"/assets/review.css?v={css_v}\">\n"));
-    if let Some(boot) = p.boot.filter(|_| !p.ready.is_empty()) {
-        h.push_str(&format!("<script type=\"module\" src=\"{}\"></script>\n", html_escape(boot)));
+    if let Some(glue) = p.glue.filter(|g| !p.ready.is_empty() && is_asset_url(g)) {
+        h.push_str(&format!("<script type=\"module\">{}</script>\n", boot_script(glue)));
     }
     h.push_str("</head>\n<body>\n<header class=\"top\">\n<div class=\"title\">");
     h.push_str(&format!("<h1>{title}</h1><p class=\"sub\" id=\"count\">{count}</p></div>\n"));
@@ -109,6 +116,12 @@ pub fn render(p: &PageInput) -> String {
     h
 }
 
+/// Whether `url` is one of our own asset URLs (`/assets/<name>?v=<hex>`), safe to put in the
+/// script text as is.
+fn is_asset_url(url: &str) -> bool {
+    url.starts_with("/assets/") && url.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-?=".contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,7 +161,7 @@ mod tests {
             edited: false,
         }];
         let ready = vec!["small".to_string()];
-        let html = render(&PageInput { share: &s, comments: &c, ready: &ready, boot: Some("/assets/boot.js?v=1") });
+        let html = render(&PageInput { share: &s, comments: &c, ready: &ready, glue: Some("/assets/review_web.js?v=1a2b") });
         assert!(!html.contains("<script>x"));
         assert!(!html.contains("<img"));
         assert!(!html.contains("<b>Cut"));
@@ -156,15 +169,18 @@ mod tests {
         assert!(html.contains("01:00:01:05"));
         assert!(html.contains("playsinline"));
         assert!(html.contains("src=\"v/small.mp4#t=0.001\""));
-        assert!(html.contains("<script type=\"module\" src=\"/assets/boot.js?v=1\"></script>"));
-        // no inline script anywhere (the CSP forbids it)
+        // one script: the bootstrap line, which the page's CSP allows by its hash
+        assert!(html.contains("<script type=\"module\">import init from \"/assets/review_web.js?v=1a2b\"; init();</script>"));
         assert_eq!(html.matches("<script").count(), 1);
+        // a URL that is not our asset never reaches the script
+        let bad = render(&PageInput { share: &s, comments: &c, ready: &ready, glue: Some("/assets/x.js\"; alert(1); \"") });
+        assert!(!bad.contains("<script"));
     }
 
     #[test]
     fn a_share_still_rendering_waits_and_refreshes() {
         let s = share();
-        let html = render(&PageInput { share: &s, comments: &[], ready: &[], boot: Some("/b.js") });
+        let html = render(&PageInput { share: &s, comments: &[], ready: &[], glue: Some("/assets/review_web.js?v=1") });
         assert!(html.contains("http-equiv=\"refresh\""));
         assert!(!html.contains("<video"));
         assert!(!html.contains("<form"));

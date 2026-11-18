@@ -257,3 +257,35 @@ fn renditions_keep_the_aspect_and_fit_phones() {
     assert_eq!(review::renditions(640, 360).len(), 1);
     assert_eq!(review::renditions(0, 0)[0].width % 2, 0);
 }
+
+#[test]
+fn review_funnel_reads_tailscale_and_only_points_links_at_a_working_funnel() {
+    use filmcraft_review::tunnel::ProbeOutput;
+    use std::sync::{Arc, Mutex};
+    let mut f = fixture();
+    assert!(f.s.execute("review.funnel", json!({})).is_err(), "no probe in this build");
+    let status = r#"{"BackendState":"Running","Self":{"DNSName":"cut.tail0.ts.net.","CapMap":{"https":null,"funnel":null}}}"#;
+    let serve = Arc::new(Mutex::new(String::from("{}")));
+    let sockets = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (sv, so) = (serve.clone(), sockets.clone());
+    f.s.review.tunnel = Some(Arc::new(move |sock: &str| {
+        so.lock().unwrap().push(sock.to_string());
+        ProbeOutput { tool: Some("tailscale".into()), status: Ok(status.into()), serve: Ok(sv.lock().unwrap().clone()) }
+    }));
+    let v = f.s.execute("review.funnel", json!({})).unwrap();
+    assert_eq!((v["state"].as_str(), v["ready"].as_bool(), v["serving"].is_null()), (Some("Running"), Some(false), true));
+    assert_eq!(v["steps"][0], "Turn on Funnel for the review server: `tailscale funnel --bg 8787`.");
+    assert!(f.s.execute("review.funnel", json!({"use": true})).is_err(), "no funnel yet: links stay as they are");
+    assert_eq!(f.s.execute("review.config", json!({})).unwrap()["publicBaseUrl"], "");
+    for bad in [json!({"socket": "relative.sock"}), json!({"socket": "/a\nb"}), json!({"socket": format!("/{}", "a".repeat(400))})] {
+        assert!(f.s.execute("review.funnel", bad.clone()).is_err(), "{bad}");
+    }
+    *serve.lock().unwrap() =
+        r#"{"TCP":{"443":{}},"Web":{"cut.tail0.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8787"}}}},"AllowFunnel":{"cut.tail0.ts.net:443":true}}"#
+            .into();
+    let v = f.s.execute("review.funnel", json!({"use": true, "socket": "/var/run/ts.sock"})).unwrap();
+    assert_eq!((v["ready"].as_bool(), v["linkBase"].as_str()), (Some(true), Some("https://cut.tail0.ts.net")));
+    assert_eq!(v["stop"], "tailscale --socket=/var/run/ts.sock funnel --https=443 off");
+    assert_eq!(sockets.lock().unwrap().last().map(String::as_str), Some("/var/run/ts.sock"));
+    assert_eq!(f.s.execute("review.config", json!({})).unwrap()["publicBaseUrl"], "https://cut.tail0.ts.net");
+}

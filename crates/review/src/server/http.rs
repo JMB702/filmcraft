@@ -183,6 +183,31 @@ pub const SECURITY_HEADERS: &[(&str, &str)] =
 /// The page's Content Security Policy: our own scripts only, no inline script, wasm allowed.
 pub const CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
+/// [`CSP`] that also allows one inline script, by its SHA-256 (`'sha256-<base64>'`).
+pub fn csp_with_script(script: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = base64(&Sha256::digest(script.as_bytes()));
+    CSP.replacen("script-src 'self'", &format!("script-src 'self' 'sha256-{hash}'"), 1)
+}
+
+/// Standard base64 with padding.
+fn base64(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
+    for c in b.chunks(3) {
+        let at = |i: usize| u32::from(c.get(i).copied().unwrap_or(0));
+        let n = (at(0) << 16) | (at(1) << 8) | at(2);
+        for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
+            if i <= c.len() {
+                out.push(char::from(A[((n >> shift) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 pub fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
@@ -366,5 +391,16 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("Location: /xSet-Cookie: a\r\n"));
         assert!(!s.contains("\r\nSet-Cookie"));
+    }
+    #[test]
+    fn the_page_csp_allows_only_the_bootstrap_line() {
+        for (input, out) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foobar", "Zm9vYmFy")] {
+            assert_eq!(base64(input.as_bytes()), out);
+        }
+        // sha256("") in base64
+        assert!(csp_with_script("").contains("script-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=' 'wasm-unsafe-eval'"));
+        let csp = csp_with_script("import init from \"/assets/review_web.js?v=1\"; init();");
+        assert!(!csp.contains("unsafe-inline"));
+        assert_eq!(csp.matches("'sha256-").count(), 1);
     }
 }
