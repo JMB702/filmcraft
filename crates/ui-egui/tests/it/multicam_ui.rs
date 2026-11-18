@@ -231,6 +231,8 @@ fn create_multicam_dialog_view_and_live_switching() {
     });
     d.frames(6);
     d.snapshot("multicam-view");
+    let over_shots = text_over_angles(&mut d);
+    assert!(over_shots.is_empty(), "the grid shows only the shots, no labels: {over_shots:?}");
     // clicking an angle switches the clip at the playhead; audio follows video when asked
     d.exec("multicam.audioFollowsVideo", json!({"enabled": true}));
     d.click("program.multicam.angle.2");
@@ -424,6 +426,29 @@ fn create_multicam_from_clips_selected_in_the_timeline() {
 }
 
 /// The label of the automation element `id` (exact match), if it is on screen.
+/// Text painted inside any multicam angle cell.
+fn text_over_angles(d: &mut Driver) -> Vec<String> {
+    let auto = &d.app().auto;
+    let cells: Vec<egui::Rect> = auto
+        .previous
+        .iter()
+        .chain(auto.elements.iter())
+        .filter(|e| e.id.starts_with("program.multicam.angle."))
+        .map(|e| egui::Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])))
+        .collect();
+    assert!(!cells.is_empty(), "the multicam grid is drawn");
+    fn walk(s: &egui::Shape, cells: &[egui::Rect], out: &mut Vec<String>) {
+        match s {
+            egui::Shape::Text(t) if cells.iter().any(|c| c.intersects(t.visual_bounding_rect())) => out.push(t.galley.text().to_string()),
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, cells, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    d.harness.output().shapes.iter().for_each(|c| walk(&c.shape, &cells, &mut out));
+    out
+}
+
 fn label(d: &mut Driver, id: &str) -> Option<String> {
     let v = d.ok("ui.elements", json!({"prefix": id}));
     v.as_array()?.iter().find(|e| e["id"] == id).and_then(|e| e["label"].as_str().map(str::to_string))

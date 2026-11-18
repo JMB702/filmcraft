@@ -452,7 +452,9 @@ pub fn grid(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect) {
         let cell_i = k - lay.first;
         let cell = Rect::from_min_size(pic.min + vec2((cell_i % cols) as f32 * cw, (cell_i / cols) as f32 * ch), vec2(cw, ch));
         let name = cams.cameras.get(angle).map(|c| c.name.clone()).unwrap_or_default();
-        let resp = ui.interact(cell, egui::Id::unique(("multicam-angle", k)), Sense::click()).on_hover_text(tlf!("Camera {n} — {name}", n = k + 1, name));
+        // Nothing is drawn over a shot (no number, name or tooltip): the grid shows only the
+        // pictures and which angle is live. The camera's name stays on its automation element.
+        let resp = ui.interact(cell, egui::Id::unique(("multicam-angle", k)), Sense::click());
         app.auto.add(&format!("program.multicam.angle.{}", k + 1), cell, &name);
         if resp.clicked() {
             // modifiers held now, or carried by the click event (synthetic input)
@@ -470,11 +472,6 @@ pub fn grid(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect) {
             let col = if recording { Color32::from_rgb(0xe0, 0x3a, 0x3a) } else { Color32::from_rgb(0xf2, 0xc9, 0x4c) };
             ui.painter().rect_stroke(cell.shrink(1.5), 0.0, Stroke::new(3.0, col), StrokeKind::Inside);
         }
-        let label = format!("{}  {name}", k + 1);
-        let galley = ui.painter().layout_no_wrap(label, Tokens::ui(11.0), Color32::WHITE);
-        let lr = Rect::from_min_size(cell.left_bottom() + vec2(6.0, -galley.size().y - 8.0), galley.size() + vec2(8.0, 4.0));
-        ui.painter().rect_filled(lr, 3.0, Color32::from_black_alpha(160));
-        ui.painter().galley(lr.min + vec2(4.0, 2.0), galley, Color32::WHITE);
     }
     if paged {
         let bar = Rect::from_min_max(pos2(area.min.x, area.max.y - 22.0), area.max);
