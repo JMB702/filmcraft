@@ -260,6 +260,8 @@ pub struct FilmcraftApp {
     pub(crate) control_input_only: bool,
     /// Backend focus before synthetic input changes egui's effective focus for this frame.
     pub(crate) native_window_focused: Option<bool>,
+    /// Paints a window that is in use although the window system reports it hidden (`app/occlusion.rs`).
+    pub(crate) occlusion: app::occlusion::Guard,
     /// Wakes a hidden window when its project file changes on disk (`app/disk_watch.rs`);
     /// `Some(None)` once starting it failed.
     #[cfg(not(target_arch = "wasm32"))]

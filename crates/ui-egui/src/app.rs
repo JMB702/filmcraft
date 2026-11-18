@@ -15,6 +15,7 @@ mod gpu;
 mod ime;
 mod input;
 mod keys;
+pub(crate) mod occlusion;
 mod playback;
 mod prefs;
 mod textures;
@@ -69,6 +70,7 @@ impl FilmcraftApp {
             pending_panel_raise: None,
             control_input_only: false,
             native_window_focused: None,
+            occlusion: occlusion::Guard::default(),
             #[cfg(not(target_arch = "wasm32"))]
             disk_waker: None,
             synthetic_modifiers: egui::Modifiers::NONE,
@@ -344,6 +346,7 @@ impl FilmcraftApp {
         self.poll_jobs(ctx);
         capture::drain(self, ctx);
         capture::request_hidden_paint(self, ctx);
+        self.occlusion.apply(ctx);
     }
 
     /// Draw one real UI pass. Establish the UI clock offset once, run first-pass input handling,
@@ -453,6 +456,9 @@ impl eframe::App for FilmcraftApp {
     /// hidden logic callbacks is not appended twice; a real UI pass clears it.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.native_window_focused = Some(raw_input.focused);
+        // Before any control input is added: only the person's own input proves the window is seen.
+        let used = !self.control_input_only && self.synthetic.is_empty() && self.synthetic_pending_step.is_none() && occlusion::used(&raw_input.events);
+        self.occlusion.observe(raw_input.viewport().visible(), used);
         capture::note_raw_geometry(self, ctx, raw_input);
         #[cfg(target_os = "macos")]
         if !self.control_input_only {
@@ -561,6 +567,35 @@ mod lifecycle_synthetic_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The UI redraw stall: eframe runs only `logic` while the window system reports the window
+    /// hidden, so a window stuck on a stale "hidden" report never draws again, however it is used.
+    /// Once the person clicks into it, `logic` asks for a painted pass despite the report, at once,
+    /// and keeps asking (a full pass also runs `logic`) until the window system reports again.
+    #[test]
+    fn a_window_used_while_reported_hidden_is_painted_anyway() {
+        fn pass(app: &mut FilmcraftApp, ctx: &egui::Context, occluded: bool, events: Vec<Event>) -> (bool, bool) {
+            let mut raw = egui::RawInput { events, ..Default::default() };
+            let viewport = raw.viewports.entry(egui::ViewportId::ROOT).or_default();
+            viewport.minimized = Some(false);
+            viewport.occluded = Some(occluded);
+            eframe::App::raw_input_hook(app, ctx, &mut raw);
+            let output = ctx.run_logic(&raw, |ctx| app.logic_inner(ctx));
+            let paint = output
+                .viewport_commands
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|commands| commands.contains(&egui::ViewportCommand::RequestPaintWhileHidden));
+            (paint, ctx.has_requested_repaint())
+        }
+        let ctx = egui::Context::default();
+        let mut app = FilmcraftApp::new(Session::default());
+        let click = Event::PointerButton { pos: pos2(20.0, 20.0), button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE };
+        assert!(!pass(&mut app, &ctx, true, vec![]).0, "a hidden window nobody uses is left unpainted");
+        assert_eq!(pass(&mut app, &ctx, true, vec![click]), (true, true), "a click into it gets a painted pass at once");
+        assert!(pass(&mut app, &ctx, true, vec![]).0, "and the next passes are painted too");
+        assert!(!pass(&mut app, &ctx, false, vec![]).0, "until the window system reports it shown");
+        assert!(!pass(&mut app, &ctx, true, vec![]).0, "after which a real hide is trusted again");
     }
 
     /// `raw_input_hook` runs before hidden logic ticks too, but those raw events are not fed to
