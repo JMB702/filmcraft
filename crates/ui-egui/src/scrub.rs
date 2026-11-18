@@ -7,6 +7,11 @@
 //! so the device is not reopened every frame. The stream closes when the button is released and
 //! the grain has played, when the setting is off, or when playback starts.
 //!
+//! Stepping one frame (or Shift's several) with the arrow keys plays that frame's sound too, so a
+//! cue can be found frame by frame. A step's grain is exactly one frame long, so the sound heard
+//! belongs to the frame shown and not the next one, and the stream lingers longer after a step
+//! than after a drag, so tapping through frames does not reopen the device each time.
+//!
 //! The grain plays on [`ScrubOut`], a separate output from playback's: opening an output stream
 //! starts the OS audio engine, which can take most of a second (0.5-1 s measured on WASAPI,
 //! #2633), and `cpal::Stream` is `!Send`. An implementation opens the stream on a thread that
@@ -24,6 +29,8 @@ pub const GRAIN_S: f64 = 0.08;
 const RAMP_S: f64 = 0.004;
 /// How long the stream stays open after the last move once the button is up.
 const LINGER_S: f64 = 0.25;
+/// How long the stream stays open after the last arrow-key step: taps come seconds apart.
+const STEP_LINGER_S: f64 = 3.0;
 
 /// The scrub grain's output, separate from playback's.
 ///
@@ -63,6 +70,10 @@ pub struct ScrubAudio {
     open: bool,
     last_tick: Option<Tick>,
     last_move: f64,
+    /// How long the stream stays open after `last_move`.
+    linger: f64,
+    /// A keyboard frame step moved the Program playhead since the last tick.
+    stepped: bool,
 }
 
 impl ScrubAudio {
@@ -73,6 +84,12 @@ impl ScrubAudio {
     /// The output device was stopped under the stream: the next grain reopens it.
     pub(crate) fn device_stopped(&mut self) {
         self.open = false;
+    }
+
+    /// The Program playhead was stepped by frames (arrow keys, the step buttons): the next tick
+    /// plays that frame's sound even though no mouse button is down.
+    pub(crate) fn frame_stepped(&mut self) {
+        self.stepped = true;
     }
 }
 
@@ -90,6 +107,7 @@ impl FilmcraftApp {
     pub fn scrub_tick(&mut self, now: f64, down: bool) -> bool {
         let ph = self.session.playhead();
         let prev = self.scrub.last_tick.replace(ph);
+        let stepped = std::mem::take(&mut self.scrub.stepped);
         if self.playback.playing || self.source_playback.clock.playing {
             // playback (Program or Source) owns the playback output: it stopped the scrub stream
             // when it started, and the scrub must not stop it when the button is released. The
@@ -103,10 +121,13 @@ impl FilmcraftApp {
             return false;
         }
         let on = self.session.prefs.audio.scrub_audio;
-        if on && down && prev.is_some_and(|p| p != ph) {
-            self.scrub_grain(ph, now);
+        if on && (down || stepped) && prev.is_some_and(|p| p != ph) {
+            // a drag plays a short grain; a step plays exactly the frame it landed on
+            let frame = (stepped && !down).then(|| self.session.sequence_rate().frame_duration());
+            self.scrub_grain(ph, now, frame);
+            self.scrub.linger = if frame.is_some() { STEP_LINGER_S } else { LINGER_S };
         }
-        if self.scrub.open && (!on || (!down && now - self.scrub.last_move >= LINGER_S)) {
+        if self.scrub.open && (!on || (!down && now - self.scrub.last_move >= self.scrub.linger)) {
             if let Some(out) = self.scrub_out.as_mut() {
                 out.stop();
             } else if let Some(a) = self.audio.as_mut() {
@@ -117,8 +138,9 @@ impl FilmcraftApp {
         self.scrub.open
     }
 
-    /// Aim the scrub stream at `at` (opening it if needed) and play one grain.
-    fn scrub_grain(&mut self, at: Tick, now: f64) {
+    /// Aim the scrub stream at `at` (opening it if needed) and play one grain: `len` long, or
+    /// [`GRAIN_S`] when not given.
+    fn scrub_grain(&mut self, at: Tick, now: f64, len: Option<Tick>) {
         let Some(seq_id) = self.session.state.active_sequence else { return };
         let sr = match self.scrub_out.as_ref() {
             Some(out) => out.sample_rate(),
@@ -127,7 +149,11 @@ impl FilmcraftApp {
         if sr == 0 {
             return;
         }
-        let total = ((GRAIN_S * sr as f64) as i64).max(1);
+        let total = match len {
+            Some(len) if len > Tick::ZERO => len.to_units_floor(i64::from(sr)),
+            _ => (GRAIN_S * sr as f64) as i64,
+        }
+        .max(1);
         {
             let mut g = self.scrub.grain.lock().unwrap_or_else(PoisonError::into_inner);
             *g = Grain { cursor: at.to_units_floor(sr as i64), left: total, total };
@@ -298,6 +324,53 @@ mod tests {
         assert!(loudness(&fill) > 0.0, "the next move plays again on the same stream");
         assert!(app.scrub_tick(0.05, false), "lingers briefly after release");
         assert!(!app.scrub_tick(0.05 + LINGER_S, false), "then closes");
+        assert!(fill.lock().unwrap().is_none());
+    }
+
+    /// The samples the open stream plays next that are not silent.
+    fn heard_frames(fill: &Arc<Mutex<Option<Fill>>>) -> usize {
+        let mut g = fill.lock().unwrap();
+        let Some(f) = g.as_mut() else { return 0 };
+        let mut buf = vec![0.0; 8192 * 2];
+        f(&mut buf, 2);
+        buf.chunks(2).rposition(|fr| fr.iter().any(|s| *s != 0.0)).map_or(0, |i| i + 1)
+    }
+
+    /// Stepping frame by frame with the arrow keys (no mouse button down) plays the frame
+    /// stepped onto, exactly one frame of it, and keeps the stream open between taps.
+    #[test]
+    fn arrow_key_steps_play_the_frame_they_land_on() {
+        let (mut app, fill) = app(true);
+        let ctx = egui::Context::default();
+        let rate = app.session.sequence_rate();
+        app.session.set_playhead(rate.tick_of(60));
+        assert!(!app.scrub_tick(0.0, false), "nothing moved yet");
+        crate::menus::invoke(&mut app, &ctx, "playhead.stepForward", serde_json::json!({})).unwrap();
+        assert_eq!(app.session.playhead(), rate.tick_of(61));
+        assert!(app.scrub_tick(0.02, false), "the step opens the stream without a button down");
+        let one_frame = rate.frame_duration().to_units_floor(48_000) as usize;
+        let heard = heard_frames(&fill);
+        assert!(heard > one_frame / 2 && heard <= one_frame, "one frame of sound, not a drag grain: {heard} of {one_frame}");
+        assert_eq!(loudness(&fill), 0.0, "then silence");
+
+        crate::menus::invoke(&mut app, &ctx, "playhead.stepBack", serde_json::json!({})).unwrap();
+        assert!(app.scrub_tick(1.0, false));
+        assert!(loudness(&fill) > 0.0, "stepping back plays too, on the same stream");
+        assert!(app.scrub_tick(1.0 + LINGER_S + 0.5, false), "stays open between taps");
+        assert!(!app.scrub_tick(1.0 + STEP_LINGER_S, false), "then closes");
+
+        // a move that was not a step (a timecode typed in, a marker jump) stays silent
+        app.session.set_playhead(rate.tick_of(90));
+        assert!(!app.scrub_tick(5.0, false));
+        assert!(fill.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn steps_are_silent_with_the_setting_off() {
+        let (mut app, fill) = app(false);
+        app.scrub_tick(0.0, false);
+        crate::menus::invoke(&mut app, &egui::Context::default(), "playhead.stepForward", serde_json::json!({})).unwrap();
+        assert!(!app.scrub_tick(0.02, false));
         assert!(fill.lock().unwrap().is_none());
     }
 

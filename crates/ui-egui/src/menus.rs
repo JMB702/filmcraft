@@ -196,7 +196,14 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
     if let Some(marker) = edit_marker_at_playhead(app, id, &params) {
         return Ok(json!({"dialog": "markerProperties", "marker": marker}));
     }
-    invoke_command(app, ctx, id, params)
+    // Stepping the Program playhead by frames plays the frame's sound (audio during scrubbing).
+    let program_step =
+        matches!(id, "playhead.stepBack" | "playhead.stepForward" | "playhead.stepBack5" | "playhead.stepForward5") && !targets_source(app, &params);
+    let result = invoke_command(app, ctx, id, params);
+    if program_step && result.is_ok() {
+        app.scrub.frame_stepped();
+    }
+    result
 }
 
 /// Add Marker from the keyboard (M), the menu or a monitor button on a frame that already has a
