@@ -48,7 +48,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         state.owner = owner;
         state.project = Some(app.session.project_instance.clone());
     }
-    let Some((owner, (title, rate, drop, markers))) = owner.and_then(|owner| owner.details(app).map(|d| (owner, d))) else {
+    let Some((owner, (title, clock, markers))) = owner.and_then(|owner| owner.details(app).map(|d| (owner, d))) else {
         ui.label(if state.source { tl!("No source clip open") } else { tl!("No sequence open") });
         app.ui.markers_panel = state;
         return;
@@ -164,10 +164,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 Color32::from_rgb(r, g, b),
             );
             let name = display_title(m);
-            let time = |tick| filmcraft_time::format_time(tick, rate, drop, filmcraft_time::TimeDisplay::Timecode, 48000);
-            let mut line = time(m.start);
+            let mut line = clock.timecode(m.start);
             if m.duration > filmcraft_time::Tick::ZERO {
-                line.push_str(&format!("  ({})", time(m.duration)));
+                line.push_str(&format!("  ({})", clock.duration(m.duration)));
             }
             if m.kind == filmcraft_project::MarkerKind::Chapter {
                 line.push_str("  ");

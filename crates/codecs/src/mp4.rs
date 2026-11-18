@@ -90,6 +90,8 @@ pub struct Mp4Source {
     snap: bool,
     /// The playable audio tracks in file order: `info.audio_streams[k]` describes `audios[k]`.
     audios: Vec<Mp4Audio>,
+    /// The start timecode counts in drop-frame (`tmcd` flag, or a Sony `rtmd` block's flag).
+    tc_drop_frame: bool,
 }
 
 pub fn sniff(b: &[u8]) -> bool {
@@ -249,7 +251,7 @@ fn rtmd_fields(sample: &[u8], rate: FrameRate) -> Option<(i64, i64, i64, i64, bo
 /// Start timecode from a Sony `rtmd` track as a frame count at `rate` (issue #460), used when the
 /// file has no `tmcd` track. `None` if there is no `rtmd` track or it has no usable first sample.
 /// Only the fixed-size header is read (a damaged `stsz` size can't drive a huge allocation).
-fn rtmd_start_timecode(file: &Mp4File, bytes: &crate::Src, rate: FrameRate) -> Option<i64> {
+fn rtmd_start_timecode(file: &Mp4File, bytes: &crate::Src, rate: FrameRate) -> Option<(i64, bool)> {
     let t = file.tracks.iter().find(|t| t.entries.first().is_some_and(|e| e.format.0 == *b"rtmd"))?;
     let s = t.samples.first()?;
     if s.size < RTMD_HEADER_LEN as u32 {
@@ -258,7 +260,7 @@ fn rtmd_start_timecode(file: &Mp4File, bytes: &crate::Src, rate: FrameRate) -> O
     let mut buf = [0u8; RTMD_HEADER_LEN];
     bytes.read_at(s.offset, &mut buf).ok()?;
     let (h, m, s, f, drop) = rtmd_fields(&buf, rate)?;
-    Some(filmcraft_time::fields_to_frames(h, m, s, f, rate, drop))
+    Some((filmcraft_time::fields_to_frames(h, m, s, f, rate, drop), drop && rate.supports_drop_frame()))
 }
 
 impl Mp4Source {
@@ -364,13 +366,17 @@ impl Mp4Source {
         let (atracks, audio_streams): (Vec<usize>, Vec<AudioStreamInfo>) =
             atracks.into_iter().filter_map(|i| Some((i, audio_stream_info(file.tracks.get(i)?, &bytes)?))).unzip();
         let duration = vtrack.or(atracks.first().copied()).and_then(|i| file.tracks.get(i)).map(|t| presentation_duration(&file, t)).unwrap_or_default();
-        let start_timecode = file.tracks.iter().find_map(|t| match t.codec() {
-            Some(CodecConfig::Timecode(tc)) => tc.start_frame.map(|f| f as i64),
+        let tmcd = file.tracks.iter().find_map(|t| match t.codec() {
+            Some(CodecConfig::Timecode(tc)) => tc.start_frame.map(|f| (f as i64, tc.drop_frame())),
             _ => None,
         });
         // Sony XAVC files with no `tmcd` track carry the start timecode in an `rtmd` metadata
         // track; convert its fields to a frame count using the video frame rate.
-        let start_timecode = start_timecode.or_else(|| rtmd_start_timecode(&file, &bytes, video.as_ref()?.frame_rate));
+        let tmcd = tmcd.or_else(|| rtmd_start_timecode(&file, &bytes, video.as_ref()?.frame_rate));
+        let (start_timecode, tc_drop_frame) = match tmcd {
+            Some((f, df)) => (Some(f), df),
+            None => (None, false),
+        };
         let info = MediaInfo {
             name: name.to_string(),
             kind: if video.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly },
@@ -406,7 +412,7 @@ impl Mp4Source {
             let t = &file.tracks[i];
             crate::gop::snap_coarse_units(t.samples.iter().map(|s| s.pts.saturating_add(t.edit_offset)), 1, i64::from(t.timescale), v.frame_rate)
         });
-        Ok(Self { info, bytes, file, vtrack, video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture), snap, audios })
+        Ok(Self { info, bytes, file, vtrack, video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture), snap, audios, tc_drop_frame })
     }
 
     fn read(&self, track: usize, i: usize) -> crate::Result<Vec<u8>> {
@@ -502,6 +508,9 @@ impl VideoSamples for Mp4Video<'_> {
 impl MediaSource for Mp4Source {
     fn info(&self) -> &MediaInfo {
         &self.info
+    }
+    fn timecode_drop_frame(&self) -> bool {
+        self.tc_drop_frame
     }
 
     fn video_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>, MediaError> {

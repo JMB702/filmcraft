@@ -919,6 +919,10 @@ pub struct SequenceSettingsDraft {
     pub working_space: String,
     pub wide_gamut: bool,
     pub auto_tone_map: bool,
+    /// Start Time as typed (`16:49:16;19`, read with the timebase and drop-frame setting chosen),
+    /// and as it was when the dialog opened: only a changed one is sent.
+    pub start_time: String,
+    pub start_time_was: String,
 }
 
 impl Default for SequenceSettingsDraft {
@@ -943,6 +947,8 @@ impl Default for SequenceSettingsDraft {
             working_space: "rec709".into(),
             wide_gamut: false,
             auto_tone_map: true,
+            start_time: "00:00:00:00".into(),
+            start_time_was: "00:00:00:00".into(),
         }
     }
 }

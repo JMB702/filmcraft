@@ -263,6 +263,11 @@ pub trait MediaSource: Send + Sync {
     fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer> {
         if stream == 0 { self.audio(start, frames, sample_rate) } else { Err(MediaError::NoStream("audio")) }
     }
+    /// Whether the file's own start timecode ([`MediaInfo::start_timecode`]) counts in drop-frame
+    /// (a QuickTime `tmcd` track's flag, for example). Sources that cannot tell say no.
+    fn timecode_drop_frame(&self) -> bool {
+        false
+    }
 }
 
 pub type SharedSource = Arc<dyn MediaSource>;

@@ -933,7 +933,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, cx: &mut Ctx)
     let t = cx.t;
     let seq = cx.seq;
     ui.painter().line_segment([pos2(row.min.x, row.min.y + 0.5), pos2(row.max.x, row.min.y + 0.5)], Stroke::new(1.0, t.separator));
-    let tc = format_time(cx.now, seq.settings.frame_rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
+    let tc = seq.clock().timecode(cx.now);
     ui.painter().text(pos2(row.min.x + 12.0, row.center().y), Align2::LEFT_CENTER, tc, Tokens::mono(13.0), t.timecode);
     let dur = format_time(seq.duration(), seq.settings.frame_rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
     ui.painter().text(pos2(row.max.x - 12.0, row.center().y), Align2::RIGHT_CENTER, dur, Tokens::mono(12.0), t.text_dim);

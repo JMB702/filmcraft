@@ -22,7 +22,7 @@
 //! - Edit Subclip `editSubclip.*`: `startFrame`, `endFrame`, `restrictTrims`, `convertToMaster`;
 //! - Audio Channels `audioChannels.*`: `format.<mono|stereo|5.1|adaptive>`, `count`,
 //!   `clip.<n>.ch.<c>` (n, c 0-based);
-//! - Timecode `timecode.*`: `timecode`, `tapeName`, `reset`;
+//! - Timecode `timecode.*`: `timecode`, `dropFrame.<true|false>`, `tapeName`, `reset`;
 //! - Frame Hold Options `frameHold.*`: `enabled`, `holdOn.<in|out|playhead|sourceTimecode|sequenceTime>`,
 //!   `timecode`, `holdFilters`;
 //! - Field Options `fieldOptions.*`: `reverseFieldDominance`, `processing.<none|alwaysDeinterlace|flickerRemoval>`;
@@ -252,13 +252,21 @@ fn defaults(app: &FilmcraftApp, id: &str) -> (Value, Value) {
         }
         "clip.modifyTimecode" => {
             let it = s.state.project_selection.iter().find_map(|i| s.project.item(*i).and_then(|it| Some((it, it.as_media()?))));
-            let (tc, tape) = it
+            // the clip's timecode in its own counting; Time Display Format only where the rate has a
+            // drop-frame form (29.97, 59.94, 119.88)
+            let (tc, tape, df, df_ok) = it
                 .map(|(it, m)| {
                     let f = m.info.start_timecode.unwrap_or(0);
-                    (filmcraft_time::format_timecode_frames(f, m.frame_rate(), false), it.metadata.get("Tape Name").cloned().unwrap_or_default())
+                    let df = m.timecode_drop_frame();
+                    let tc = filmcraft_time::format_timecode_frames(f, m.frame_rate(), df);
+                    (tc, it.metadata.get("Tape Name").cloned().unwrap_or_default(), df, m.frame_rate().supports_drop_frame())
                 })
-                .unwrap_or_else(|| ("00:00:00:00".into(), String::new()));
-            (json!({"timecode": tc, "tapeName": tape}), Value::Null)
+                .unwrap_or_else(|| ("00:00:00:00".into(), String::new(), false, false));
+            let mut p = json!({"timecode": tc, "tapeName": tape});
+            if df_ok {
+                p["dropFrame"] = json!(df);
+            }
+            (p, json!({"dropFrameSupported": df_ok}))
         }
         "clip.frameHoldOptions" => {
             let it = s.active_sequence().and_then(|q| s.state.selection.iter().find_map(|c| q.find_item(*c).map(|x| x.1.clone())));
@@ -590,6 +598,16 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
             }
             "clip.modifyTimecode" => {
                 text(ui, &mut elems, pre, p, "timecode", tl!("Set Timecode:"), 120.0);
+                if d.info["dropFrameSupported"].as_bool() == Some(true) {
+                    ui.label(RichText::new(tl!("Time Display Format")).strong());
+                    for (df, l) in [(true, tl!("Drop-Frame")), (false, tl!("Non Drop-Frame"))] {
+                        let r = ui.radio(p["dropFrame"].as_bool() == Some(df), l);
+                        push(&mut elems, format!("{pre}.dropFrame.{df}"), &r, l);
+                        if r.clicked() {
+                            p["dropFrame"] = json!(df);
+                        }
+                    }
+                }
                 text(ui, &mut elems, pre, p, "tapeName", tl!("Tape Name:"), 200.0);
                 check(ui, &mut elems, pre, p, "reset", tl!("Use the file's timecode"), true);
             }

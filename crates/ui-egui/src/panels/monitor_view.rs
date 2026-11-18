@@ -19,7 +19,7 @@
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, Vec2, pos2, vec2};
 use filmcraft_project::ItemId;
-use filmcraft_time::{Tick, TimeDisplay, format_time};
+use filmcraft_time::Tick;
 use serde_json::{Value, json};
 
 use crate::FilmcraftApp;
@@ -740,10 +740,10 @@ fn column_peak(peaks: &[(f32, f32)], shown: (Tick, Tick), f0: f64, f1: f64) -> (
 const TICKS_PER_SAMPLE_48K: f64 = filmcraft_time::TICKS_PER_SECOND as f64 / 48_000.0;
 
 /// Comparison View: the reference side's label, timecode and step / set buttons.
-pub fn compare_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, rate: filmcraft_time::FrameRate, drop_frame: bool, display: TimeDisplay) {
+pub fn compare_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, clock: &filmcraft_project::TimeClock) {
     let t = app.tokens;
     let rf = Tick(app.ui.program.compare_ref.unwrap_or(app.session.playhead().0));
-    let tc = format_time(rf, rate, drop_frame, display, 48000);
+    let tc = clock.format(rf);
     ui.painter().text(pos2(bar.min.x + 4.0, bar.center().y), Align2::LEFT_CENTER, tlf!("Reference  {tc}", tc), Tokens::ui(11.0), t.text_dim);
     let mut x = bar.max.x;
     for (key, label, tip) in [
@@ -760,8 +760,8 @@ pub fn compare_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, rate: f
         if resp.clicked() {
             let nt = match key {
                 "set" => app.session.playhead(),
-                "next" => rf + rate.frame_duration(),
-                _ => (rf - rate.frame_duration()).max(Tick::ZERO),
+                "next" => rf + clock.rate.frame_duration(),
+                _ => (rf - clock.rate.frame_duration()).max(Tick::ZERO),
             };
             app.ui.program.compare_ref = Some(nt.0);
         }

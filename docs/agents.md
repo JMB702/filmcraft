@@ -206,7 +206,13 @@ print(call("engine.execute", command="sequence.inspect"))
 Notes:
 
 - Time is in ticks (254 016 000 000 per second). Commands also accept `seconds`, `frame` or
-  `timecode`.
+  `timecode`. Ticks, `seconds` and `frame` count from the sequence's first frame; `timecode` is
+  the time the sequence shows, so it includes Sequence ▸ Start Time and is drop-frame when the
+  sequence is.
+- `sequence.settings {"startTimecode": "16:49:16;19"}` (or a frame count) sets the Start Time, read
+  with the sequence's drop-frame setting; the ruler, monitors, timecode fields and markers show it.
+  `clip.modifyTimecode {"item", "timecode", "dropFrame": true}` gives a clip drop-frame source
+  timecode (Media Start/End, the Source monitor); new clips take it from the file's timecode track.
 - A track parameter (`track`, `audioTrack`) is a track id or a name such as `"V1"` / `"A2"`.
   Leaving it out picks the command's default track; naming a track the sequence does not have is
   an "invalid parameters" error, never a different track.

@@ -838,7 +838,9 @@ fn export_ale(s: &mut Session, p: &Value) -> Result<Value> {
 // ---------------------------------------------------------------------------------------------
 
 /// File properties of a probed media file (Get Media File Properties).
-pub fn info_json(name: &str, path: Option<&str>, info: &filmcraft_media::MediaInfo) -> Value {
+/// `drop_frame`: the start timecode counts in drop-frame (the clip's Modify ▸ Timecode setting or
+/// the file's timecode track).
+pub fn info_json(name: &str, path: Option<&str>, info: &filmcraft_media::MediaInfo, drop_frame: bool) -> Value {
     let rate = info.frame_rate();
     let secs = info.duration.seconds();
     let mut v = json!({
@@ -848,7 +850,8 @@ pub fn info_json(name: &str, path: Option<&str>, info: &filmcraft_media::MediaIn
         "container": info.container,
         "fileSize": info.file_size,
         "duration": {"ticks": info.duration.0, "seconds": secs, "timecode": filmcraft_time::format_timecode_frames(rate.frame_at(info.duration), rate, false)},
-        "startTimecode": info.start_timecode.map(|f| filmcraft_time::format_timecode_frames(f, rate, false)),
+        "startTimecode": info.start_timecode.map(|f| filmcraft_time::format_timecode_frames(f, rate, drop_frame)),
+        "dropFrame": drop_frame && rate.supports_drop_frame(),
         "dataRateKbps": info.file_size.filter(|_| secs > 0.0).map(|b| (b as f64 * 8.0 / secs / 1000.0).round()),
     });
     if let Some(vs) = &info.video {
@@ -869,7 +872,7 @@ fn media_properties(s: &mut Session, p: &Value) -> Result<Value> {
     for id in targets(s, p) {
         let Some((mid, m)) = media_of(&s.project, id) else { continue };
         let name = s.project.item(id).map(|i| i.name.clone()).unwrap_or_default();
-        let mut v = info_json(&name, file_path(m), &m.info);
+        let mut v = info_json(&name, file_path(m), &m.info, m.timecode_drop_frame());
         v["item"] = json!(id.0);
         v["offline"] = json!(m.offline || s.media.offline_status(mid).is_some());
         out.push(v);
@@ -884,7 +887,7 @@ fn media_properties_file(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.mediaPropertiesFile", "need `path`"))?;
     let src = s.media.open_file(path, &*s.services)?;
     let name = std::path::Path::new(path).file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
-    Ok(info_json(&name, Some(path), src.info()))
+    Ok(info_json(&name, Some(path), src.info(), src.timecode_drop_frame()))
 }
 
 fn pair_p(p: &Value, k: &str) -> Option<(f64, f64)> {

@@ -730,7 +730,7 @@ fn match_controls(ui: &mut egui::Ui, app: &mut FilmcraftApp, out: &mut Vec<(&'st
     }
     let reference = app.ui.program.compare_ref.filter(|_| comparing).map(filmcraft_time::Tick);
     if let (Some(r), Some(q)) = (reference, app.session.active_sequence()) {
-        tc = filmcraft_time::format_time(r, q.settings.frame_rate, q.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48000);
+        tc = q.clock().timecode(r);
     }
     ui.horizontal(|ui| {
         ui.add_sized(vec2(110.0, 20.0), egui::Label::new(egui::RichText::new(tl!("Reference")).color(t.text_dim)));

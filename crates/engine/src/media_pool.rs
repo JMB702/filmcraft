@@ -602,6 +602,9 @@ impl MediaSource for UnsupportedAsSlate {
     fn info(&self) -> &MediaInfo {
         self.inner.info()
     }
+    fn timecode_drop_frame(&self) -> bool {
+        self.inner.timecode_drop_frame()
+    }
     fn video_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
         match self.inner.video_frame(req) {
             Err(MediaError::Unsupported(why)) => {
@@ -649,6 +652,9 @@ struct DamagedAsSlate {
 impl MediaSource for DamagedAsSlate {
     fn info(&self) -> &MediaInfo {
         self.inner.info()
+    }
+    fn timecode_drop_frame(&self) -> bool {
+        self.inner.timecode_drop_frame()
     }
     fn video_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
         let r = self.inner.video_frame(req);

@@ -179,8 +179,19 @@ pub fn metadata_target(s: &Session, p: &Value) -> Option<ItemId> {
     s.state.project_selection.first().copied().or_else(|| s.state.selection.first().and_then(|c| clip_item(*c)))
 }
 
-fn tc(t: Tick, rate: filmcraft_time::FrameRate) -> String {
-    format_time(t, rate, false, TimeDisplay::Timecode, 48000)
+fn tc(t: Tick, rate: filmcraft_time::FrameRate, drop_frame: bool) -> String {
+    format_time(t, rate, drop_frame, TimeDisplay::Timecode, 48000)
+}
+
+/// How an item's own times are shown (Media Start / End, the Source monitor): a clip's media start
+/// timecode and drop-frame setting, a subclip's parent's, a sequence's Start Time. None for others.
+pub fn item_clock(p: &Project, it: &filmcraft_project::ProjectItem) -> Option<filmcraft_project::TimeClock> {
+    match &it.kind {
+        ItemKind::Media(m) => Some(m.clock()),
+        ItemKind::Subclip { parent, .. } => p.item(*parent).and_then(|x| x.as_media()).map(|m| m.clock()),
+        ItemKind::Sequence(q) => Some(q.clock().with_display(TimeDisplay::Timecode)),
+        _ => None,
+    }
 }
 
 /// Every Metadata panel row of an item (Clip section, then File section).
@@ -203,7 +214,10 @@ pub fn metadata_fields(p: &Project, id: ItemId) -> Vec<Field> {
     let col = |c: &str| filmcraft_project::find::column_text(p, it, c);
     add("Clip", "Frame Rate", col("Frame Rate"), false);
     // media start / end / duration in the item's own timecode
-    let start = media.and_then(|m| m.info.start_timecode).map(|f| rate.tick_of(f)).unwrap_or(Tick::ZERO);
+    // the item's own timecode: the media's start timecode (drop-frame if flagged) or Start Time
+    let clock = item_clock(p, it).unwrap_or_else(|| filmcraft_project::TimeClock::plain(rate, false));
+    let (start, df) = (clock.start, clock.drop_frame);
+    let tc = |t: Tick, rate| tc(t, rate, df);
     let (offset, dur) = match &it.kind {
         ItemKind::Subclip { range, .. } => (range.start, range.duration),
         _ => (Tick::ZERO, it.duration()),

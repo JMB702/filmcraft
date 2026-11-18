@@ -374,6 +374,24 @@ pub fn timecode_field(
     out
 }
 
+/// [`timecode_field`] for a timeline whose times are shown through `clock` (a sequence's Start
+/// Time, a clip's media timecode): `time` and `min` are timeline times, the field shows and reads
+/// back `clock`'s displayed times, and the time to go to comes back as timeline time.
+#[allow(clippy::too_many_arguments)]
+pub fn clock_field(
+    ui: &mut Ui,
+    id: egui::Id,
+    rect: Rect,
+    text: &str,
+    time: Tick,
+    min: Tick,
+    clock: &filmcraft_project::TimeClock,
+    color: Color32,
+) -> Option<Result<Tick, String>> {
+    let r = timecode_field(ui, id, rect, text, clock.shown(time), clock.shown(min), clock.rate, clock.drop_frame, clock.display, color);
+    r.map(|r| r.map(|shown| (shown - clock.start).max(min)))
+}
+
 /// Escape closes a dialog or popup only when no mouse button is held: with one held it cancels the
 /// drag in progress instead (#580).
 pub fn escape_closes(ctx: &egui::Context) -> bool {

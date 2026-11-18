@@ -178,7 +178,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             "Timecode…",
             &["Clip", "Modify"],
             None,
-            r#"{"item":id?,"timecode":"HH:MM:SS:FF"?,"frame":i64?,"tapeName":str?,"reset":bool?}"#,
+            r#"{"item":id?,"timecode":"HH:MM:SS:FF"?,"frame":i64?,"dropFrame":bool?,"tapeName":str?,"reset":bool?}"#,
             has_media_selection,
             modify_timecode,
         ),

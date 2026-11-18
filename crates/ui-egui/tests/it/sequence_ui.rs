@@ -164,7 +164,7 @@ fn marker_navigation_saves_one_edit_skips_noops_and_orders_coincident_markers() 
     let before = d.app().session.project.to_json();
     let history = d.app().session.history.undo.len();
     let owner = filmcraft_ui_egui::panels::marker_properties::Owner::current(d.app(), false).unwrap();
-    let marker = owner.details(d.app()).unwrap().3.into_iter().find(|m| m.id.0 == first).unwrap();
+    let marker = owner.details(d.app()).unwrap().2.into_iter().find(|m| m.id.0 == first).unwrap();
     filmcraft_ui_egui::panels::marker_properties::open_owned(d.app(), &marker, owner);
     d.frames(3);
     let previous = d.ok("ui.elements", json!({"prefix":"markerProperties.previous"}));
@@ -250,7 +250,7 @@ fn marker_navigation_keeps_the_original_source_owner_after_source_switch() {
     let first = d.exec("markers.add", json!({"target":"source","time":0}))["marker"].as_u64().unwrap();
     let second = d.exec("markers.add", json!({"target":"source","time":254016000000_i64}))["marker"].as_u64().unwrap();
     let owner = filmcraft_ui_egui::panels::marker_properties::Owner::Source(5);
-    let marker = owner.details(d.app()).unwrap().3.into_iter().find(|m| m.id.0 == first).unwrap();
+    let marker = owner.details(d.app()).unwrap().2.into_iter().find(|m| m.id.0 == first).unwrap();
     filmcraft_ui_egui::panels::marker_properties::open_owned(d.app(), &marker, owner);
     d.frames(3);
     d.exec("source.open", json!({"item":6}));
@@ -260,7 +260,7 @@ fn marker_navigation_keeps_the_original_source_owner_after_source_switch() {
     let draft = d.app().ui.marker_properties.as_ref().unwrap();
     assert_eq!(draft.owner, owner);
     assert_eq!(draft.marker, second);
-    assert_eq!(owner.details(d.app()).unwrap().3.iter().find(|m| m.id.0 == first).unwrap().name, "Original source edit");
+    assert_eq!(owner.details(d.app()).unwrap().2.iter().find(|m| m.id.0 == first).unwrap().name, "Original source edit");
     assert_eq!(d.app().session.project.item(filmcraft_project::ItemId(6)).unwrap(), &unrelated);
     assert_eq!(d.app().session.state.source_item, Some(filmcraft_project::ItemId(6)));
     d.click("markerProperties.cancel");
@@ -282,7 +282,7 @@ fn marker_navigation_keeps_the_original_sequence_after_sequence_switch() {
     let draft = d.app().ui.marker_properties.as_ref().unwrap();
     assert_eq!(draft.owner, owner);
     assert_eq!(draft.marker, second);
-    assert_eq!(owner.details(d.app()).unwrap().3.iter().find(|m| m.id.0 == first).unwrap().name, "Original sequence edit");
+    assert_eq!(owner.details(d.app()).unwrap().2.iter().find(|m| m.id.0 == first).unwrap().name, "Original sequence edit");
     assert_eq!(d.app().session.active_sequence().unwrap(), &unrelated);
     assert_eq!(d.app().session.state.active_sequence, active);
     d.click("markerProperties.cancel");

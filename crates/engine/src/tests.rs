@@ -291,7 +291,8 @@ fn sequence_settings_without_params_reports_the_settings() {
     let r = s.execute("sequence.settings", json!({})).unwrap();
     assert_eq!(*s.project, before);
     assert_eq!(s.history.undo.len(), history, "no undo step");
-    assert_eq!(r, json!({"settings": s.execute("sequence.inspect", json!({})).unwrap()["settings"]}), "{r}");
+    let inspect = s.execute("sequence.inspect", json!({})).unwrap();
+    assert_eq!(r, json!({"settings": inspect["settings"], "startTimecode": inspect["startTimecode"]}), "{r}");
     assert_eq!((r["settings"]["width"].clone(), r["settings"]["height"].clone()), (json!(1280), json!(720)), "{r}");
 }
 

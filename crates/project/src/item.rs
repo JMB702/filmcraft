@@ -27,6 +27,10 @@ pub struct Interpretation {
     /// is edited into a sequence. None = one stereo clip of the first two channels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_channels: Option<AudioChannelMap>,
+    /// Modify ▸ Timecode ▸ Time Display Format, or the file's own timecode track: whether the
+    /// media start timecode counts in drop-frame. None (projects from older builds) = non-drop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timecode_drop_frame: Option<bool>,
 }
 
 /// Modify ▸ Audio Channels: the clip channel format and, per audio clip, the source channels it

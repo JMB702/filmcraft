@@ -351,7 +351,7 @@ pub fn info(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             tl!("Settings:"),
             format!("{}x{} · {} fps · {} Hz", seq.settings.width, seq.settings.height, seq.settings.frame_rate.label(), seq.settings.sample_rate),
         );
-        line(ui, tl!("Playhead:"), format_time(app.session.playhead(), seq.settings.frame_rate, seq.settings.drop_frame, TimeDisplay::Timecode, 48000));
+        line(ui, tl!("Playhead:"), seq.clock().timecode(app.session.playhead()));
         for (i, tr) in seq.video_tracks.iter().enumerate().rev() {
             let at = tr.item_at(app.session.playhead()).map(|x| x.name.clone()).unwrap_or_default();
             line(ui, &tlf!("Video {n}:", n = i + 1), at);

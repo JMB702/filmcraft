@@ -332,12 +332,15 @@ pub fn cell(p: &Project, it: &ProjectItem, column: &str) -> (String, SortKey) {
         ItemKind::Subclip { parent, .. } => p.item(*parent).map(|x| x.frame_rate()).unwrap_or_default(),
         _ => it.frame_rate(),
     };
-    let tc = |t: Tick| format_time(t, rate, false, TimeDisplay::Timecode, 48000);
+    // Media Start / End in the item's own timecode (drop-frame when flagged; a sequence's Start Time)
+    let clock = crate::panels::item_clock(p, it);
+    let df = clock.is_some_and(|c| c.drop_frame);
+    let tc = |t: Tick| format_time(t, rate, df, TimeDisplay::Timecode, 48000);
     let time = |t: Option<Tick>| match t {
         Some(t) => (tc(t), SortKey::Num(t.0 as f64)),
         None => (String::new(), SortKey::Num(f64::MIN)),
     };
-    let start = media.and_then(|m| m.info.start_timecode).map(|f| rate.tick_of(f)).unwrap_or(Tick::ZERO);
+    let start = clock.map(|c| c.start).unwrap_or(Tick::ZERO);
     let (offset, dur) = match &it.kind {
         ItemKind::Subclip { range, .. } => (range.start, range.duration),
         _ => (Tick::ZERO, it.duration()),

@@ -9,7 +9,6 @@
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_project::{CaptionAlign, CaptionAnchor, CaptionFormat};
-use filmcraft_time::{TimeDisplay, format_time};
 use serde_json::{Value, json};
 
 use crate::FilmcraftApp;
@@ -106,9 +105,10 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         run(app, ui, actions);
         return;
     }
-    let rate = seq.settings.frame_rate;
-    let df = seq.settings.drop_frame;
-    let tc = |x: filmcraft_time::Tick| format_time(x, rate, df, TimeDisplay::Timecode, 48_000);
+    // caption times as the timeline shows them (Start Time added); typed ones go back through
+    // `captions.setTimes`, which takes it off again
+    let clock = seq.clock();
+    let tc = |x: filmcraft_time::Tick| clock.timecode(x);
     // the track shown: the one holding the first selected caption, else C1
     let sel = app.session.state.caption_selection.clone();
     let track_idx = sel.first().and_then(|c| seq.caption_tracks.iter().position(|tr| tr.caption(*c).is_some())).unwrap_or(0);
@@ -373,8 +373,8 @@ fn graphics(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         crate::dock::placeholder(ui, rect, &t, tl!("Open a sequence to search its graphics"));
         return;
     };
-    let (rate, df) = (seq.settings.frame_rate, seq.settings.drop_frame);
-    let tc = |x: filmcraft_time::Tick| format_time(x, rate, df, TimeDisplay::Timecode, 48_000);
+    let clock = seq.clock();
+    let tc = |x: filmcraft_time::Tick| clock.timecode(x);
     let ph = app.session.playhead();
     let entries = graphic_texts(seq, ph);
     let mut actions: Vec<(String, Value)> = Vec::new();
@@ -493,8 +493,8 @@ pub fn caption_properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect)
     let Some((track_id, c)) = app.session.state.caption_selection.iter().find_map(|id| seq.find_caption(*id)) else { return };
     let track_idx = seq.caption_tracks.iter().position(|tr| tr.id == track_id).unwrap_or(0);
     let track_name = seq.caption_tracks.get(track_idx).map(|tr| tr.name.as_str()).unwrap_or_default();
-    let (rate, df) = (seq.settings.frame_rate, seq.settings.drop_frame);
-    let tc = |x: filmcraft_time::Tick| format_time(x, rate, df, TimeDisplay::Timecode, 48_000);
+    let clock = seq.clock();
+    let tc = |x: filmcraft_time::Tick| clock.timecode(x);
     let mut actions: Vec<(String, Value)> = Vec::new();
     let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(14.0, 8.0))).id_salt("props-caption"));
     let (hr, _) = bui.allocate_exact_size(vec2(bui.available_width(), 30.0), Sense::hover());
@@ -539,7 +539,7 @@ pub fn caption_properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect)
     }
     bui.horizontal(|ui| {
         ui.add_sized(vec2(70.0, 22.0), egui::Label::new(egui::RichText::new(tl!("Duration")).size(12.0).color(t.text_dim)));
-        ui.label(egui::RichText::new(tc(c.duration)).font(Tokens::mono(11.5)).color(t.text));
+        ui.label(egui::RichText::new(clock.duration(c.duration)).font(Tokens::mono(11.5)).color(t.text));
     });
     run(app, ui, actions);
 }
@@ -642,13 +642,13 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let current = filmcraft_edit::transcript::word_at(words, ph);
     let paras = &content.paragraphs;
     let rate = app.session.sequence_rate();
-    let df = app.session.active_sequence().is_some_and(|q| q.settings.drop_frame);
+    let clock = app.session.active_sequence().map(|q| q.clock()).unwrap_or_else(|| filmcraft_project::TimeClock::plain(rate, false));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list.shrink(6.0)).id_salt("transcript-list"));
     egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("transcript-scroll").show(&mut child, |ui| {
         ui.set_width(list.width() - 16.0);
         for (pi, pr) in paras.iter().enumerate() {
             let w0 = &words[pr.start];
-            let head = format!("{}  {}", w0.speaker.as_deref().unwrap_or(tl!("Speaker")), format_time(w0.start, rate, df, TimeDisplay::Timecode, 48_000));
+            let head = format!("{}  {}", w0.speaker.as_deref().unwrap_or(tl!("Speaker")), clock.timecode(w0.start));
             let hr = ui.label(egui::RichText::new(head).size(11.0).color(t.text_dim).strong());
             app.auto.add(&format!("text.transcript.paragraph.{pi}"), hr.rect, "Paragraph");
             ui.horizontal_wrapped(|ui| {

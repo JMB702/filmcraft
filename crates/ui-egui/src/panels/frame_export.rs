@@ -31,14 +31,19 @@ fn clean(name: &str) -> String {
 
 pub fn open(app: &mut FilmcraftApp, ctx: &egui::Context, params: &Value) -> Result<Value, String> {
     let target = frame_export_target(&app.session, params).map_err(|e| e.to_string())?;
-    let (rate, drop_frame) = if target.source {
+    // the time as the monitor shows it: the clip's own timecode, or the sequence's Start Time
+    let clock = if target.source {
         let view = filmcraft_engine::clip_ops::source_view(&app.session, target.item).ok_or("Source clip is unavailable")?;
-        (view.rate, false)
+        app.session
+            .project
+            .item(target.item)
+            .and_then(|it| filmcraft_engine::panels::item_clock(&app.session.project, it))
+            .filter(|c| c.rate == view.rate)
+            .unwrap_or_else(|| filmcraft_project::TimeClock::plain(view.rate, false))
     } else {
-        let sequence = app.session.project.sequence(target.item).ok_or("Program sequence is unavailable")?;
-        (sequence.settings.frame_rate, sequence.settings.drop_frame)
+        app.session.project.sequence(target.item).ok_or("Program sequence is unavailable")?.clock()
     };
-    let timecode = filmcraft_time::format_time(target.time, rate, drop_frame, filmcraft_time::TimeDisplay::Timecode, 48000);
+    let timecode = clock.timecode(target.time);
     if target.source {
         app.stop_source();
     } else if app.playback.playing {

@@ -48,7 +48,9 @@ impl Owner {
     pub fn current(app: &FilmcraftApp, source: bool) -> Option<Self> {
         if source { app.session.state.source_item.map(|id| Self::Source(id.0)) } else { app.session.state.active_sequence.map(|id| Self::Sequence(id.0)) }
     }
-    pub fn details(self, app: &FilmcraftApp) -> Option<(String, filmcraft_time::FrameRate, bool, Vec<Marker>)> {
+    /// Title, how its times are shown (the sequence's Start Time, a clip's own timecode; always
+    /// as timecode) and its markers.
+    pub fn details(self, app: &FilmcraftApp) -> Option<(String, filmcraft_project::TimeClock, Vec<Marker>)> {
         let id = filmcraft_project::ItemId(match self {
             Self::Sequence(id) | Self::Source(id) => id,
         });
@@ -56,14 +58,20 @@ impl Owner {
         match self {
             Self::Sequence(_) => {
                 let q = app.session.project.sequence(id)?;
-                Some((tlf!("Sequence: {name}", name = &item.name), q.settings.frame_rate, q.settings.drop_frame, q.markers.clone()))
+                Some((tlf!("Sequence: {name}", name = &item.name), q.clock().with_display(filmcraft_time::TimeDisplay::Timecode), q.markers.clone()))
             }
             Self::Source(_) => {
                 let v = filmcraft_engine::clip_ops::source_view(&app.session, id)?;
+                let clock = app
+                    .session
+                    .project
+                    .item(v.media)
+                    .and_then(|it| filmcraft_engine::panels::item_clock(&app.session.project, it))
+                    .filter(|c| c.rate == v.rate)
+                    .unwrap_or_else(|| filmcraft_project::TimeClock::plain(v.rate, false));
                 Some((
                     if v.media != id { tlf!("Source: {name} (shared source markers)", name = &item.name) } else { tlf!("Source: {name}", name = &item.name) },
-                    v.rate,
-                    app.session.project.sequence(v.media).is_some_and(|q| q.settings.drop_frame),
+                    clock.with_display(filmcraft_time::TimeDisplay::Timecode),
                     v.markers,
                 ))
             }
@@ -80,16 +88,17 @@ pub fn open(app: &mut FilmcraftApp, marker: &Marker) {
 /// as Premiere does; of coincident markers the first in the list wins.
 pub fn at_playhead(app: &FilmcraftApp, source: bool) -> Option<(Marker, Owner)> {
     let owner = Owner::current(app, source)?;
-    let (_, rate, _, markers) = owner.details(app)?;
+    let (_, clock, markers) = owner.details(app)?;
+    let rate = clock.rate;
     let playhead = if source { app.session.state.source_playhead } else { app.session.playhead() };
     let frame = rate.frame_at(playhead);
     markers.into_iter().find(|m| rate.frame_at(m.start) == frame).map(|m| (m, owner))
 }
 pub fn open_owned(app: &mut FilmcraftApp, marker: &Marker, owner: Owner) {
-    let Some((_, rate, drop, _)) = owner.details(app) else { return };
-    let format = |ticks| filmcraft_time::format_time(ticks, rate, drop, filmcraft_time::TimeDisplay::Timecode, 48000).replace(';', ":");
-    let time = format(marker.start);
-    let duration = format(marker.duration);
+    let Some((_, clock, _)) = owner.details(app) else { return };
+    // the field takes `:` only; drop-frame counting still applies when it is read back
+    let time = clock.timecode(marker.start).replace(';', ":");
+    let duration = clock.duration(marker.duration).replace(';', ":");
     app.ui.marker_properties = Some(Draft {
         project: app.session.project_instance.clone(),
         owner,
@@ -127,10 +136,11 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     if !Arc::ptr_eq(&draft.project, &app.session.project_instance) {
         return;
     }
-    let Some((title, rate, drop, mut markers)) = draft.owner.details(app) else {
+    let Some((title, clock, mut markers)) = draft.owner.details(app) else {
         app.ui.status = tl!("Marker owner is unavailable").into();
         return;
     };
+    let (rate, drop) = (clock.rate, clock.drop_frame);
     // Commands can edit or remove this marker while its dialog (or native picker) is open.
     // Unrelated edits do not invalidate the draft. Ties use IDs so coincident markers remain reachable.
     markers.sort_by_key(|m| (m.start, m.id.0));
@@ -495,16 +505,20 @@ fn save(app: &mut FilmcraftApp, draft: &Draft) -> Result<(), String> {
 }
 
 fn edit_params(app: &FilmcraftApp, draft: &Draft) -> Result<serde_json::Value, String> {
-    let Some((_, rate, drop, _)) = draft.owner.details(app) else {
+    let Some((_, clock, _)) = draft.owner.details(app) else {
         return Err(tl!("Marker owner is unavailable").into());
     };
-    let parse = |value: &str| -> Result<i64, String> {
-        let f = parse_marker_timecode(value, rate, drop)?;
+    let (rate, drop) = (clock.rate, clock.drop_frame);
+    // a duration counts from zero; a time is the displayed one, so the start offset comes off it
+    let parse_from = |value: &str, offset: i64| -> Result<i64, String> {
+        let f = parse_marker_timecode(value, rate, drop)?.saturating_sub(offset);
         if f < 0 || f > rate.frame_at(filmcraft_time::Tick::MAX) {
             return Err(tl!("Time is outside the supported range").into());
         }
         Ok(f)
     };
+    let parse = |value: &str| parse_from(value, 0);
+    let start_frames = rate.frame_at(clock.start);
     let mut p = draft.owner.params();
     p["marker"] = json!(draft.marker);
     p["name"] = json!(draft.name);
@@ -517,7 +531,7 @@ fn edit_params(app: &FilmcraftApp, draft: &Draft) -> Result<serde_json::Value, S
     p["color"] = json!(if draft.custom { draft.hex.clone() } else { draft.preset.name().to_string() });
     // Do not quantize imported subframe positions when only editing text/color.
     if draft.time != draft.initial_time {
-        p["frame"] = json!(parse(&draft.time)?);
+        p["frame"] = json!(parse_from(&draft.time, start_frames)?);
     }
     if !draft.range && draft.original_duration != filmcraft_time::Tick::ZERO {
         p["durationFrames"] = json!(0);
