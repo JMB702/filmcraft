@@ -152,6 +152,13 @@ impl FilmcraftApp {
                 }
             }
         }
+        // Auto-save failing (an exFAT drive before the fix, a full or read-only volume, …): a timed
+        // auto-save toasts only the first failure, so keep the warning up for as long as it lasts.
+        if self.ui.status.is_empty()
+            && let Some(error) = self.session.persistence.as_ref().and_then(|p| p.status.auto_save_failing.clone())
+        {
+            self.ui.status = tlf!("Auto-save is failing, so your changes are not being auto-saved; use File ▸ Save. {error}", error = error);
+        }
         let hint = if !self.ui.status.is_empty() { self.ui.status.clone() } else { self.hint_text() };
         // the bar goes under the text and the job's controls, so they get their own clicks
         let resp = ui.interact(sb, egui::Id::unique("status-bar"), egui::Sense::click());

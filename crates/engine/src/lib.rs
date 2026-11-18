@@ -830,6 +830,8 @@ impl Session {
         export_tools::pump_queue(self, false);
         panels::log_jobs(self);
         let Some(p) = self.persistence.as_mut() else { return };
+        // failed auto-saves in a row before these events (the drain below counts them into the status)
+        let mut streak = p.status.auto_save_failures;
         for ev in p.drain_events() {
             match ev {
                 autosave::WorkerEvent::SavedProject { path, revision }
@@ -846,6 +848,15 @@ impl Session {
                     self.log.push(panels::Level::Error, "autosave", m.clone());
                     self.events.push(Event::Toast { message: m, error: true });
                 }
+                autosave::WorkerEvent::AutoSaveFailed(m) => {
+                    self.log.push(panels::Level::Error, "autosave", m.clone());
+                    // once per failure streak (the status-bar warning stays up meanwhile), not every interval
+                    if streak == 0 {
+                        self.events.push(Event::Toast { message: m, error: true });
+                    }
+                    streak = streak.saturating_add(1);
+                }
+                autosave::WorkerEvent::AutoSaved { .. } => streak = 0,
                 _ => {}
             }
         }

@@ -92,9 +92,50 @@ fn atomic_write_new_with(path: &Path, write: impl FnOnce(&mut File) -> io::Resul
     #[cfg(not(unix))]
     let mut staged = tempfile::NamedTempFile::new_in(&dir)?;
     write(staged.as_file_mut())?;
-    let _published = staged.persist_noclobber(path).map_err(|e| e.error)?;
+    publish_noclobber(staged, path, |staged, path| staged.persist_noclobber(path))?;
     sync_dir(&dir);
     Ok(())
+}
+
+/// Publish the complete staged file at `path` without replacing anything already there.
+///
+/// `noclobber` is `persist_noclobber`: `renamex_np(RENAME_EXCL)` / `renameat2(RENAME_NOREPLACE)`,
+/// else `link`. exFAT, FAT and some network volumes support neither (macOS answers ENOTSUP, Linux
+/// EINVAL then EPERM), so auto-save to a project on such a drive failed every time while Save, a
+/// plain `rename`, worked. There the name is claimed with an exclusive create (which fails on any
+/// existing entry, a symlink included, so nothing is overwritten) and the staged file is renamed
+/// over that empty claim, so the final name still only ever holds complete bytes once published.
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_noclobber(
+    staged: tempfile::NamedTempFile,
+    path: &Path,
+    noclobber: impl FnOnce(tempfile::NamedTempFile, &Path) -> Result<File, tempfile::PersistError>,
+) -> io::Result<()> {
+    let refused = match noclobber(staged, path) {
+        Ok(_published) => return Ok(()),
+        Err(e) if no_exclusive_rename(&e.error) => e,
+        Err(e) => return Err(e.error),
+    };
+    // the claim: fails with AlreadyExists when the name is taken (the caller picks another)
+    OpenOptions::new().write(true).create_new(true).open(path)?;
+    if let Err(e) = refused.file.persist(path) {
+        let _ = fs::remove_file(path);
+        return Err(e.error);
+    }
+    Ok(())
+}
+
+/// The volume cannot rename without replacing or hard-link (see [`publish_noclobber`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn no_exclusive_rename(e: &io::Error) -> bool {
+    // ENOTSUP / EOPNOTSUPP: 45 / 102 on Apple platforms, 95 on Linux; EPERM (1) is `link` on Linux FAT
+    #[cfg(target_vendor = "apple")]
+    const CODES: &[i32] = &[45, 102];
+    #[cfg(target_os = "linux")]
+    const CODES: &[i32] = &[95, 1];
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+    const CODES: &[i32] = &[];
+    e.kind() == io::ErrorKind::Unsupported || e.raw_os_error().is_some_and(|c| CODES.contains(&c))
 }
 
 /// Best-effort directory sync; directory handles are not uniformly readable or syncable.
@@ -113,6 +154,51 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// What exFAT answers: no exclusive rename and no hard links (ENOTSUP).
+    fn refuse(staged: tempfile::NamedTempFile, _path: &Path) -> Result<File, tempfile::PersistError> {
+        Err(tempfile::PersistError { error: io::Error::from_raw_os_error(if cfg!(target_os = "linux") { 95 } else { 45 }), file: staged })
+    }
+
+    fn staged(dir: &Path, data: &[u8]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new_in(dir).unwrap();
+        f.write_all(data).unwrap();
+        f
+    }
+
+    #[test]
+    fn volumes_without_exclusive_rename_still_publish_without_clobbering() {
+        let d = tmpdir("noexcl");
+        let p = d.join("auto.fcproj");
+        publish_noclobber(staged(&d, b"first"), &p, refuse).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"first");
+        // a taken name is still refused as AlreadyExists (the auto-save loop picks a collision name)
+        let e = publish_noclobber(staged(&d, b"second"), &p, refuse).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&p).unwrap(), b"first");
+        let names: Vec<_> = fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 1, "no staged or claim files left: {names:?}");
+        // other errors are not papered over
+        let denied = |f: tempfile::NamedTempFile, _: &Path| Err(tempfile::PersistError { error: io::Error::from(io::ErrorKind::StorageFull), file: f });
+        assert_eq!(publish_noclobber(staged(&d, b"x"), &d.join("other.fcproj"), denied).unwrap_err().kind(), io::ErrorKind::StorageFull);
+        assert!(!d.join("other.fcproj").exists());
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fallback_never_follows_or_replaces_a_symlink() {
+        let d = tmpdir("noexcl-link");
+        let target = d.join("target.txt");
+        fs::write(&target, b"keep").unwrap();
+        let p = d.join("auto.fcproj");
+        std::os::unix::fs::symlink(&target, &p).unwrap();
+        let e = publish_noclobber(staged(&d, b"new"), &p, refuse).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&target).unwrap(), b"keep");
+        assert!(fs::symlink_metadata(&p).unwrap().file_type().is_symlink());
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

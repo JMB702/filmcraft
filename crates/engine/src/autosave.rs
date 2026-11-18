@@ -683,6 +683,8 @@ pub enum WorkerEvent {
         revision: u64,
     },
     Error(String),
+    /// A timed auto-save could not be written (the recovery journal is separate).
+    AutoSaveFailed(String),
 }
 
 const WORKER_STOPPED: &str =
@@ -719,6 +721,10 @@ pub struct Status {
     pub last_write_ms: f64,
     pub last_bytes: usize,
     pub last_error: Option<String>,
+    /// While auto-saves keep failing: the latest failure, and how many in a row. A written auto-save
+    /// clears both. The UI keeps a warning up while this is set; the toast is only for the first.
+    pub auto_save_failing: Option<String>,
+    pub auto_save_failures: u64,
 }
 
 /// The running auto-save/recovery machinery of one session.
@@ -861,10 +867,17 @@ impl Persistence {
                     self.status.last_auto_save = Some(path.to_string_lossy().into_owned());
                     self.status.last_auto_save_unix = Some(*unix);
                     self.status.auto_saves_written += 1;
+                    self.status.auto_save_failing = None;
+                    self.status.auto_save_failures = 0;
                     (self.status.last_serialize_ms, self.status.last_write_ms, self.status.last_bytes) = (*serialize_ms, *write_ms, *bytes);
                 }
                 WorkerEvent::SavedProject { .. } => {}
                 WorkerEvent::Error(m) => self.status.last_error = Some(m.clone()),
+                WorkerEvent::AutoSaveFailed(m) => {
+                    self.status.last_error = Some(m.clone());
+                    self.status.auto_save_failing = Some(m.clone());
+                    self.status.auto_save_failures = self.status.auto_save_failures.saturating_add(1);
+                }
             }
         }
         ev
@@ -1122,7 +1135,8 @@ impl Worker {
             }
             Err(e) => {
                 let m = format!("auto-save to {}: {e}", dir.display());
-                self.error(m.clone());
+                log::warn!("auto-save: {m}");
+                let _ = self.events.send(WorkerEvent::AutoSaveFailed(m.clone()));
                 Err(m)
             }
         }
@@ -1299,10 +1313,30 @@ mod worker_failure_tests {
         assert_eq!(s.execute("file.autoSaveStatus", json!({})).unwrap()["running"], true);
         assert!(s.persistence.as_ref().unwrap().status.last_error.as_deref().unwrap().contains("auto-save to"));
         assert_eq!(failure_toasts(&mut s), 1);
+        // a streak of failures: the status says so, but only its first failure is a toast
+        assert!(s.execute("file.autoSaveNow", json!({})).is_err());
+        s.poll_persistence();
+        assert_eq!(failure_toasts(&mut s), 0, "a repeated failure must not toast every interval");
+        let status = &s.execute("file.autoSaveStatus", json!({})).unwrap()["status"];
+        assert_eq!(status["autoSaveFailures"], 2);
+        assert!(status["autoSaveFailing"].as_str().unwrap().contains("auto-save to"), "{status}");
         fs::remove_file(&blocked).unwrap();
         let saved = s.execute("file.autoSaveNow", json!({})).unwrap();
         assert!(Path::new(saved["path"].as_str().unwrap()).is_file());
         assert!(s.is_dirty(), "auto-save should not mark the foreground project saved");
+        s.poll_persistence();
+        let status = &s.execute("file.autoSaveStatus", json!({})).unwrap()["status"];
+        assert_eq!(
+            (status["autoSaveFailures"].clone(), status["autoSaveFailing"].clone()),
+            (json!(0), serde_json::Value::Null),
+            "a written auto-save ends the streak"
+        );
+        // a new streak toasts again
+        fs::remove_dir_all(&blocked).unwrap();
+        fs::write(&blocked, b"occupied directory path").unwrap();
+        assert!(s.execute("file.autoSaveNow", json!({})).is_err());
+        s.poll_persistence();
+        assert_eq!(failure_toasts(&mut s), 1);
         s.shutdown();
         fs::remove_dir_all(dir).unwrap();
     }
