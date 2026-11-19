@@ -26,15 +26,24 @@ pub struct PageInput<'a> {
     pub comments: &'a [Comment],
     /// Ready renditions (names), smallest first.
     pub ready: &'a [String],
-    /// URL of the wasm-bindgen glue when the wasm assets are built in (`None`: no script).
-    pub glue: Option<&'a str>,
+    /// The wasm assets when they are built in (`None`: no script).
+    pub glue: Option<Boot<'a>>,
+}
+
+/// The versioned URLs of the wasm-bindgen glue and of the wasm module it starts. Both carry
+/// their own version: a module fetched by its bare name could come from a browser's cache and
+/// pair an old build with a new page (iOS Safari did, 2026-11-19: the new buttons were dead).
+#[derive(Debug, Clone, Copy)]
+pub struct Boot<'a> {
+    pub glue: &'a str,
+    pub module: &'a str,
 }
 
 /// The page's only script: the one call that starts the wasm module. A browser cannot start a
 /// wasm module without it; everything else is Rust (a reviewed exception to "no handwritten
 /// JavaScript", see docs/review-links.md). The page's CSP allows exactly this text by its hash.
-pub fn boot_script(glue_url: &str) -> String {
-    format!("import init from \"{glue_url}\"; init();")
+pub fn boot_script(boot: Boot) -> String {
+    format!("import init from \"{}\"; init({{ module_or_path: \"{}\" }});", boot.glue, boot.module)
 }
 
 /// The page HTML.
@@ -62,8 +71,8 @@ pub fn render(p: &PageInput) -> String {
         h.push_str("<meta http-equiv=\"refresh\" content=\"8\">\n");
     }
     h.push_str(&format!("<title>{title} · Review</title>\n<link rel=\"stylesheet\" href=\"/assets/review.css?v={css_v}\">\n"));
-    if let Some(glue) = p.glue.filter(|g| !p.ready.is_empty() && is_asset_url(g)) {
-        h.push_str(&format!("<script type=\"module\">{}</script>\n", boot_script(glue)));
+    if let Some(boot) = p.glue.filter(|b| !p.ready.is_empty() && is_asset_url(b.glue) && is_asset_url(b.module)) {
+        h.push_str(&format!("<script type=\"module\">{}</script>\n", boot_script(boot)));
     }
     h.push_str("</head>\n<body>\n<header class=\"top\">\n<div class=\"title\">");
     h.push_str(&format!("<h1>{title}</h1><p class=\"sub\" id=\"count\">{count}</p></div>\n"));
@@ -165,7 +174,12 @@ mod tests {
             edited: false,
         }];
         let ready = vec!["small".to_string()];
-        let html = render(&PageInput { share: &s, comments: &c, ready: &ready, glue: Some("/assets/review_web.js?v=1a2b") });
+        let html = render(&PageInput {
+            share: &s,
+            comments: &c,
+            ready: &ready,
+            glue: Some(Boot { glue: "/assets/review_web.js?v=1a2b", module: "/assets/review_web_bg.wasm?v=3c4d" }),
+        });
         assert!(!html.contains("<script>x"));
         assert!(!html.contains("<img"));
         assert!(!html.contains("<b>Cut"));
@@ -174,17 +188,38 @@ mod tests {
         assert!(html.contains("playsinline"));
         assert!(html.contains("src=\"v/small.mp4#t=0.001\""));
         // one script: the bootstrap line, which the page's CSP allows by its hash
-        assert!(html.contains("<script type=\"module\">import init from \"/assets/review_web.js?v=1a2b\"; init();</script>"));
+        // the module's URL carries its own version, so a cached older module is never paired
+        // with this page
+        assert!(html.contains(
+            "<script type=\"module\">import init from \"/assets/review_web.js?v=1a2b\"; init({ module_or_path: \"/assets/review_web_bg.wasm?v=3c4d\" });</script>"
+        ));
         assert_eq!(html.matches("<script").count(), 1);
         // a URL that is not our asset never reaches the script
-        let bad = render(&PageInput { share: &s, comments: &c, ready: &ready, glue: Some("/assets/x.js\"; alert(1); \"") });
+        let bad = render(&PageInput {
+            share: &s,
+            comments: &c,
+            ready: &ready,
+            glue: Some(Boot { glue: "/assets/x.js\"; alert(1); \"", module: "/assets/m.wasm?v=1" }),
+        });
+        assert!(!bad.contains("<script"));
+        let bad = render(&PageInput {
+            share: &s,
+            comments: &c,
+            ready: &ready,
+            glue: Some(Boot { glue: "/assets/x.js?v=1", module: "/assets/m.wasm\"); alert(1); (\"" }),
+        });
         assert!(!bad.contains("<script"));
     }
 
     #[test]
     fn a_share_still_rendering_waits_and_refreshes() {
         let s = share();
-        let html = render(&PageInput { share: &s, comments: &[], ready: &[], glue: Some("/assets/review_web.js?v=1") });
+        let html = render(&PageInput {
+            share: &s,
+            comments: &[],
+            ready: &[],
+            glue: Some(Boot { glue: "/assets/review_web.js?v=1", module: "/assets/review_web_bg.wasm?v=2" }),
+        });
         assert!(html.contains("http-equiv=\"refresh\""));
         assert!(!html.contains("<video"));
         assert!(!html.contains("<form"));

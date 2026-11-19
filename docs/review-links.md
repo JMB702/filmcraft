@@ -133,8 +133,10 @@ embeds `review_web.js` (wasm-bindgen's generated glue) and `review_web_bg.wasm` 
 or missing either, the server serves the no-script page.
 
 **The one line of JavaScript.** A browser cannot start a wasm module without a script call, so the
-page carries exactly one inline line, `import init from "/assets/review_web.js?v=…"; init();`
-(`page::boot_script`). It is a reviewed exception to "no handwritten JavaScript in native Craft
+page carries exactly one inline line,
+`import init from "/assets/review_web.js?v=…"; init({ module_or_path: "/assets/review_web_bg.wasm?v=…" });`
+(`page::boot_script`). Both URLs carry the file's own version, so a browser never pairs a cached
+older module with a newer page. It is a reviewed exception to "no handwritten JavaScript in native Craft
 apps" (decided for this feature); everything else on the page is Rust or generated glue. The
 page's Content-Security-Policy allows that line by its SHA-256 hash, so no other inline script can
 run.

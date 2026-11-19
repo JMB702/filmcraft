@@ -399,7 +399,7 @@ mod tests {
         }
         // sha256("") in base64
         assert!(csp_with_script("").contains("script-src 'self' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=' 'wasm-unsafe-eval'"));
-        let csp = csp_with_script("import init from \"/assets/review_web.js?v=1\"; init();");
+        let csp = csp_with_script("import init from \"/assets/review_web.js?v=1\"; init({ module_or_path: \"/assets/review_web_bg.wasm?v=2\" });");
         assert!(!csp.contains("unsafe-inline"));
         assert_eq!(csp.matches("'sha256-").count(), 1);
     }
