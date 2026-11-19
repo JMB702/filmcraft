@@ -16,7 +16,7 @@
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_edit::Edge;
 use filmcraft_project::{ClipId, ItemKind, Sequence, Track, TrackId};
-use filmcraft_time::{Tick, TimeDisplay, format_time};
+use filmcraft_time::Tick;
 use serde_json::{Value, json};
 
 use crate::FilmcraftApp;
@@ -175,9 +175,7 @@ fn shift_text(frames: i64) -> String {
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let info = filmcraft_engine::trim::monitor_info(&app.session);
-    let Some(seq) = app.session.active_sequence() else { return };
-    let rate = seq.settings.frame_rate;
-    let df = seq.settings.drop_frame;
+    let Some(clock) = app.session.active_sequence().map(|q| q.clock()) else { return };
     ui.painter().rect_filled(rect, 0.0, t.panel_bg);
     let controls_h = 26.0 + 40.0;
     let header_h = 22.0;
@@ -267,7 +265,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // ---- counters row: outgoing Out timecode + shift | incoming In timecode + shift
     let row = Rect::from_min_size(pos2(rect.min.x + 10.0, area.max.y + 2.0), vec2(rect.width() - 20.0, 24.0));
-    let tc = |v: &Value, k: &str| v[k].as_i64().map(|x| format_time(Tick(x), rate, df, TimeDisplay::Timecode, 48000)).unwrap_or_else(|| "--:--:--:--".into());
+    let tc = |v: &Value, k: &str| v[k].as_i64().map(|x| clock.timecode(Tick(x))).unwrap_or_else(|| "--:--:--:--".into());
     let out_tc = tc(&info["outgoing"], "time");
     let in_tc = tc(&info["incoming"], "time");
     let out_shift = shift_text(info["outShift"].as_i64().unwrap_or(0));

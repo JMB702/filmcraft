@@ -8,7 +8,8 @@
 //! What it changes (one `sequence.settings` command, one undo step): Timebase, Frame Size (with
 //! "Scale motion effects proportionally when changing frame size", on by default), drop-frame or
 //! non-drop-frame timecode for the NTSC rates (or the Feet + Frames 16mm / 35mm and Frames display formats), audio Channel Format and Sample Rate, Maximum Render
-//! Quality, and the Color Management tab (working colour space, wide gamut, auto tone map).
+//! Quality, Start Time (the timecode of the first frame), and the Color Management tab (working
+//! colour space, wide gamut, auto tone map).
 //!
 //! Premiere settings FilmCraft has no equivalent for yet are shown greyed out with their current
 //! value and a "not supported yet" hint, rather than editable and silently ignored: Editing Mode,
@@ -18,7 +19,7 @@
 //!
 //! Automation ids (`sequenceSettings.` + …): `tab.general`, `tab.color`, `tab.vr`; General:
 //! `name`, `editingMode`, `timebase` (+ `timebase.option.<num>/<den>` while open), `width`, `height`,
-//! `aspect`, `scaleMotion`, `par`, `fields`, `videoDisplay` (+ `videoDisplay.option.<df|ndf|tc|feet16|feet35|frames>`),
+//! `aspect`, `scaleMotion`, `par`, `fields`, `videoDisplay` (+ `videoDisplay.option.<df|ndf|tc|feet16|feet35|frames>`), `startTime`,
 //! `channelFormat` (+ `channelFormat.option.<Stereo|Mono|5.1|Adaptive>`), `channels`, `sampleRate`
 //! (+ `sampleRate.option.<hz>`), `audioDisplay`, `previewFormat`, `previewCodec`, `previewWidth`,
 //! `previewHeight`, `maxBitDepth`, `maxRenderQuality`, `linearColor`; Color Management:
@@ -71,6 +72,7 @@ fn mix_name(c: AudioChannels) -> &'static str {
 pub fn open(app: &mut FilmcraftApp) {
     let Some(q) = app.session.active_sequence() else { return };
     let st = &q.settings;
+    let start = filmcraft_time::format_timecode_frames(q.start_timecode, st.frame_rate, st.drop_frame);
     let name = app.session.state.active_sequence.and_then(|id| app.session.project.item(id)).map(|i| i.name.clone()).unwrap_or_default();
     app.ui.sequence_settings = SequenceSettingsDraft {
         tab: "general".into(),
@@ -92,6 +94,8 @@ pub fn open(app: &mut FilmcraftApp) {
         working_space: st.color.working.id().into(),
         wide_gamut: st.color.wide_gamut,
         auto_tone_map: st.color.auto_tone_map,
+        start_time: start.clone(),
+        start_time_was: start,
     };
     app.dialog = Some(crate::Dialog::SequenceSettings);
 }
@@ -121,6 +125,7 @@ pub fn open_new(app: &mut FilmcraftApp, bin: Option<Option<u64>>) {
         wide_gamut: st.color.wide_gamut,
         auto_tone_map: st.color.auto_tone_map,
         name: format!("Sequence {n:02}"),
+        ..Default::default()
     };
     app.dialog = Some(crate::Dialog::SequenceSettings);
 }
@@ -147,7 +152,7 @@ fn new_sequence_params(d: &SequenceSettingsDraft) -> (Map<String, Value>, Map<St
     // what's left: only the settings `file.newSequence` has no parameter for
     let after = SequenceSettings { frame_rate: rate(d), width: d.width, height: d.height, sample_rate: d.sample_rate, ..Default::default() };
     let mut rest = changes(d, &after, name);
-    rest.retain(|k, _| matches!(k.as_str(), "dropFrame" | "videoDisplay" | "maxRenderQuality"));
+    rest.retain(|k, _| matches!(k.as_str(), "dropFrame" | "videoDisplay" | "maxRenderQuality" | "startTimecode"));
     (p, rest)
 }
 
@@ -258,6 +263,11 @@ fn changes(d: &SequenceSettingsDraft, cur: &SequenceSettings, cur_name: &str) ->
     }
     if d.auto_tone_map != cur.color.auto_tone_map {
         p.insert("autoToneMap".into(), json!(d.auto_tone_map));
+    }
+    // read by the command with the timebase and drop-frame setting sent with it
+    let start = d.start_time.trim();
+    if start != d.start_time_was.trim() && !start.is_empty() {
+        p.insert("startTimecode".into(), json!(start));
     }
     p
 }
@@ -383,6 +393,15 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
                 }
             });
             elems.push(("sequenceSettings.videoDisplay".into(), resp.response.rect, shown));
+        });
+        // Start Time: the timecode of the first frame (a day timeline starts at the time of day
+        // its first clip was shot)
+        row(ui, label_w, "Start Time:", true, |ui| {
+            let r = crate::widgets::accessible_name(
+                ui.add(egui::TextEdit::singleline(&mut d.start_time).font(egui::TextStyle::Monospace).desired_width(110.0)),
+                "Start Time",
+            );
+            elems.push(("sequenceSettings.startTime".into(), r.rect, d.start_time.clone()));
         });
     });
     section(ui, "Audio", |ui| {

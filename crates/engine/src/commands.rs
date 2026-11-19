@@ -341,15 +341,33 @@ pub(crate) fn checked_u32_p(p: &Value, key: &str, cmd: &str) -> Result<Option<u3
 }
 
 /// Parse a time from params: `time` (ticks), `frame`, `seconds` or `timecode`, with `prefix`.
+///
+/// A `timecode` is the one the timeline shows: Sequence ▸ Start Time is taken off it (`time`,
+/// `frame` and `seconds` count from the sequence's first frame).
 pub(crate) fn time_p(s: &Session, p: &Value, prefix: &str) -> Option<Tick> {
     let rate = s.sequence_rate();
     let df = s.active_sequence().map(|q| q.settings.drop_frame).unwrap_or(false);
+    let start = s.active_sequence().map(|q| q.start_tick()).unwrap_or(Tick::ZERO);
+    if start != Tick::ZERO
+        && let Some(tc) = p.get(time_key(prefix, "timecode")).and_then(Value::as_str)
+        && p.get(time_key(prefix, "time")).and_then(Value::as_i64).is_none()
+        && p.get(time_key(prefix, "frame")).and_then(Value::as_i64).is_none()
+        && p.get(time_key(prefix, "seconds")).and_then(Value::as_f64).is_none()
+    {
+        let clock = filmcraft_project::TimeClock { start, ..filmcraft_project::TimeClock::plain(rate, df) };
+        return clock.parse_timecode(tc, s.playhead()).ok();
+    }
     time_p_at(p, prefix, rate, df, s.playhead())
+}
+
+/// `name` with `prefix`: `time` → `time`, or with prefix `start` → `startTime`.
+fn time_key(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() { name.to_string() } else { format!("{prefix}{}{}", name[..1].to_uppercase(), &name[1..]) }
 }
 
 /// Same formats as [`time_p`], against an explicit rate (Source monitor, remix duration, …).
 pub(crate) fn time_p_at(p: &Value, prefix: &str, rate: FrameRate, drop_frame: bool, current: Tick) -> Option<Tick> {
-    let k = |n: &str| if prefix.is_empty() { n.to_string() } else { format!("{prefix}{}{}", n[..1].to_uppercase(), &n[1..]) };
+    let k = |n: &str| time_key(prefix, n);
     if let Some(t) = p.get(k("time")).and_then(Value::as_i64) {
         return Some(Tick(t));
     }
@@ -400,6 +418,33 @@ pub(crate) fn tick_or_time_p(p: &Value, key: &str, rate: FrameRate, drop_frame: 
             time_p_at(v, "", rate, drop_frame, Tick::ZERO).map(Some).ok_or_else(wrong)
         }
     }
+}
+
+/// Sequence ▸ Start Time: `{"frames": n, "timecode": "HH:MM:SS:FF"}` (`;` separators in drop-frame).
+pub(crate) fn start_timecode_json(q: &filmcraft_project::Sequence) -> Value {
+    let c = q.clock();
+    json!({"frames": q.start_timecode, "timecode": filmcraft_time::format_timecode_frames(q.start_timecode, c.rate, c.drop_frame)})
+}
+
+/// `startTimecode` of `sequence.settings`: a timecode string read at `rate` with drop-frame
+/// counting `drop_frame` (`"16:49:16;19"`), or a frame count. Below 24 hours, never negative.
+fn start_timecode_p(p: &Value, rate: FrameRate, drop_frame: bool, cmd: &str) -> Result<Option<i64>> {
+    let f = match p.get("startTimecode") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(tc)) => {
+            let tc = tc.trim();
+            if tc.starts_with(['+', '-']) {
+                return Err(bad(cmd, "`startTimecode` must be a timecode or a frame count, not relative"));
+            }
+            parse_timecode(tc, rate, drop_frame, 0).map_err(|e| bad(cmd, format!("startTimecode: {e}")))?
+        }
+        Some(v) => v.as_i64().ok_or_else(|| bad(cmd, "`startTimecode` must be a timecode string or a whole number of frames"))?,
+    };
+    let day = filmcraft_time::fields_to_frames(24, 0, 0, 0, rate, drop_frame);
+    if !(0..day).contains(&f) {
+        return Err(bad(cmd, format!("startTimecode must be between 00:00:00:00 and {}", filmcraft_time::format_timecode_frames(day - 1, rate, drop_frame))));
+    }
+    Ok(Some(f))
 }
 
 pub(crate) fn clip_p(p: &Value, k: &str) -> Option<ClipId> {
@@ -1081,6 +1126,9 @@ fn import_source(
     {
         v.frame_rate = crate::settings::timebase_rate(&s.prefs.media.indeterminate_timebase);
     }
+    // the file's own timecode counts in drop-frame (a `tmcd` track's flag): Media Start/End and
+    // the Source monitor show it that way until Modify ▸ Timecode says otherwise
+    let interpret = filmcraft_project::Interpretation { timecode_drop_frame: src.timecode_drop_frame().then_some(true), ..Default::default() };
     let path_s = path.to_string();
     s.media.allow(path);
     let id = s.edit(&format!("Import {name}"), |p, _| {
@@ -1090,7 +1138,7 @@ fn import_source(
             ItemKind::Media(Box::new(MediaClip {
                 media: MediaRef::File { path: path_s },
                 info,
-                interpret: Default::default(),
+                interpret,
                 mark_in: None,
                 mark_out: None,
                 markers: vec![],
@@ -2855,7 +2903,7 @@ fn build() -> Vec<CommandSpec> {
             "Sequence Settings…",
             ["Sequence"],
             None,
-            r#"{"width":u32?,"height":u32?,"fps":f64?,"name":str?,"sampleRate":u32?,"mix":"Stereo|Mono|5.1|Adaptive"?,"dropFrame":bool?,"videoDisplay":"timecode|feet35|feet16|frames"?,"maxRenderQuality":bool?,"workingSpace":"rec709"|"rec2100-pq"|"rec2100-hlg"?,"wideGamut":bool?,"autoToneMap":bool?,"scaleMotion":bool=false}"#,
+            r#"{"width":u32?,"height":u32?,"fps":f64?,"name":str?,"sampleRate":u32?,"mix":"Stereo|Mono|5.1|Adaptive"?,"dropFrame":bool?,"startTimecode":"HH:MM:SS:FF"|frames?,"videoDisplay":"timecode|feet35|feet16|frames"?,"maxRenderQuality":bool?,"workingSpace":"rec709"|"rec2100-pq"|"rec2100-hlg"?,"wideGamut":bool?,"autoToneMap":bool?,"scaleMotion":bool=false}"#,
             has_seq,
             |s, p| {
                 const CMD: &str = "sequence.settings";
@@ -2864,7 +2912,7 @@ fn build() -> Vec<CommandSpec> {
                 // undo step (#1540)
                 if reports_only(CMD, p) {
                     let q = s.project.sequence(id).ok_or(EngineError::NoSequence)?;
-                    return Ok(json!({"settings": q.settings}));
+                    return Ok(json!({"settings": q.settings, "startTimecode": start_timecode_json(q)}));
                 }
                 if !p.is_object() {
                     return Err(bad(CMD, "`params` must be an object"));
@@ -2891,6 +2939,9 @@ fn build() -> Vec<CommandSpec> {
                 if drop_frame == Some(true) && !rate.supports_drop_frame() {
                     return Err(bad(CMD, format!("drop-frame timecode needs a 29.97, 59.94 or 119.88 fps timebase, not {rate}")));
                 }
+                // Start Time, read with the timebase and counting the sequence will have
+                let df = drop_frame.unwrap_or_else(|| s.active_sequence().is_some_and(|q| q.settings.drop_frame)) && rate.supports_drop_frame();
+                let start_tc = start_timecode_p(p, rate, df, CMD)?;
                 let scale_motion = bool_p(p, "scaleMotion").unwrap_or(false);
                 let p = p.clone();
                 let scaled = s.edit("Sequence Settings", |pr, _| {
@@ -2906,7 +2957,13 @@ fn build() -> Vec<CommandSpec> {
                         q.settings.height = h;
                     }
                     if let Some(f) = fps {
+                        // a new timebase keeps the Start Time at the same moment
+                        let start = q.start_tick();
                         q.settings.frame_rate = f;
+                        q.start_timecode = f.frame_at(start);
+                    }
+                    if let Some(f) = start_tc {
+                        q.start_timecode = f;
                     }
                     if let Some(sr) = checked_u32_p(&p, "sampleRate", CMD)? {
                         q.settings.sample_rate = sr;
@@ -2938,7 +2995,8 @@ fn build() -> Vec<CommandSpec> {
                     let new_size = (q.settings.width, q.settings.height);
                     Ok(if scale_motion { edit::frame_size::scale_motion(q, old_size, new_size) } else { 0 })
                 })?;
-                Ok(json!({"scaledClips": scaled}))
+                let start = s.project.sequence(id).map(start_timecode_json);
+                Ok(json!({"scaledClips": scaled, "startTimecode": start}))
             }
         ),
         cmd!("sequence.renderEffectsInToOut", "Render Effects In to Out", ["Sequence"], Some("Enter"), r#"{"wait":bool=false}"#, has_seq, |s, p| {
@@ -5330,6 +5388,7 @@ pub fn inspect_sequence(s: &Session, id: ItemId, q: &filmcraft_project::Sequence
         "id": id.0,
         "name": s.project.item(id).map(|i| i.name.clone()),
         "settings": q.settings,
+        "startTimecode": start_timecode_json(q),
         "duration": q.duration().0,
         "durationFrames": f1 - f0,
         "playhead": s.state.playheads.get(&id).map(|t| t.0),

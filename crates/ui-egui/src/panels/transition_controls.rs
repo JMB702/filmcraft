@@ -260,7 +260,7 @@ fn ticks_for(lane: Rect, view: (Tick, Tick), px: f32) -> Tick {
 fn timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, lane: Rect, id: TransitionId, x: &Transition, elems: &mut Elems) -> Option<Value> {
     let t = app.tokens;
     let seq = app.session.active_sequence()?;
-    let (rate, drop_frame) = (seq.settings.frame_rate.sane(), seq.settings.drop_frame);
+    let rate = seq.settings.frame_rate.sane();
     let frame = rate.frame_duration();
     let track = seq.all_tracks().find(|tr| tr.transitions.iter().any(|y| y.id == id))?;
     let (_, cut, _) = trn::bounds(track, x)?;
@@ -275,7 +275,8 @@ fn timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, lane: Rect, id: Transitio
     let painter = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
     painter.rect_filled(lane, 0.0, t.tl_bg);
     let ruler = Rect::from_min_max(lane.min, pos2(lane.max.x, lane.min.y + RULER_H));
-    paint_ruler(&painter, ruler, v, rate, drop_frame, &t);
+    let clock = filmcraft_project::TimeClock { rate, ..seq.clock() };
+    paint_ruler(&painter, ruler, v, &clock, &t);
     // the rows: A on top, the transition between, B under it, as Premiere stacks them
     let row = |i: f32| {
         let top = ruler.max.y + 4.0 + i * (BAR_H + 2.0);
@@ -439,8 +440,10 @@ fn timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, lane: Rect, id: Transitio
     change
 }
 
-/// The timeline's ruler: ticks and sequence timecode across `view` (the clip view's spacing).
-fn paint_ruler(p: &egui::Painter, ruler: Rect, view: (Tick, Tick), rate: FrameRate, drop_frame: bool, t: &Tokens) {
+/// The timeline's ruler: ticks and sequence timecode (Start Time added, on round displayed frames)
+/// across `view` (the clip view's spacing).
+fn paint_ruler(p: &egui::Painter, ruler: Rect, view: (Tick, Tick), clock: &filmcraft_project::TimeClock, t: &Tokens) {
+    let rate = clock.rate;
     let p = p.with_clip_rect(ruler.intersect(p.clip_rect()));
     let span = (view.1 - view.0).0.max(1) as f64;
     let frame_px = f64::from(ruler.width()) * rate.frame_duration().0.max(1) as f64 / span;
@@ -450,23 +453,17 @@ fn paint_ruler(p: &egui::Painter, ruler: Rect, view: (Tick, Tick), rate: FrameRa
     // labels far enough apart to read; the small ticks divide the labelled ones evenly
     let label_step = steps.iter().copied().find(|s| *s > 0 && *s as f64 * frame_px >= 80.0);
     let minor = steps.iter().copied().find(|s| *s > 0 && *s as f64 * frame_px >= 8.0 && label_step.is_none_or(|l| l % s == 0));
-    let (f0, f1) = (rate.frame_at(view.0), rate.frame_at(view.1));
+    let (from, to) = (view.0, view.1);
     let base_y = ruler.max.y - 1.0;
     for (step, h, labelled) in [(minor, 3.0, false), (label_step, 7.0, true)] {
         let Some(step) = step else { continue };
-        let mut f = f0.div_euclid(step).saturating_mul(step);
         // a step is at least 8 px wide, so this covers any ruler; the cap is for damaged numbers
-        for _ in 0..4096 {
-            if f > f1 {
-                break;
-            }
-            let x = x_of(ruler, view, rate.tick_of(f));
+        for (at, _) in clock.with_display(filmcraft_time::TimeDisplay::Timecode).ruler_marks(from, to, step, 4096) {
+            let x = x_of(ruler, view, at);
             p.line_segment([pos2(x, base_y - h), pos2(x, base_y)], Stroke::new(1.0, t.tl_ruler_tick));
-            if labelled && f >= 0 {
-                let label = filmcraft_time::format_time(rate.tick_of(f), rate, drop_frame, filmcraft_time::TimeDisplay::Timecode, 48000);
-                p.text(pos2(x, ruler.min.y + 7.0), Align2::CENTER_CENTER, label, Tokens::ui(10.0), t.tl_ruler_text);
+            if labelled && at >= Tick::ZERO {
+                p.text(pos2(x, ruler.min.y + 7.0), Align2::CENTER_CENTER, clock.timecode(at), Tokens::ui(10.0), t.tl_ruler_text);
             }
-            f = f.saturating_add(step);
         }
     }
 }

@@ -11,7 +11,7 @@ use filmcraft_captions::{Document, Format};
 use filmcraft_edit as edit;
 use filmcraft_edit::Edge;
 use filmcraft_project::{CaptionAlign, CaptionAnchor, CaptionFormat, CaptionStyle, CaptionTrack, ClipId, SequenceSettings, TrackId};
-use filmcraft_time::{Tick, TimeDisplay, format_time};
+use filmcraft_time::{Tick, TimeDisplay};
 
 use crate::commands::{CommandSpec, always, bad, bool_p, f64_p, has_seq, str_p, time_p, u64_p};
 use crate::{EngineError, Result, Session};
@@ -223,16 +223,15 @@ pub fn paste(s: &mut Session, insert: bool) -> Result<Value> {
 }
 
 fn caption_json(s: &Session, c: &filmcraft_project::Caption) -> Value {
-    let q = s.active_sequence();
-    let (rate, df) = q.map(|q| (q.settings.frame_rate, q.settings.drop_frame)).unwrap_or_default();
-    let tc = |t: Tick| format_time(t, rate, df, TimeDisplay::Timecode, 48_000);
+    // in / out as the timeline shows them (Start Time added); `captions.setTimes` takes them back
+    let clock = s.active_sequence().map(|q| q.clock().with_display(TimeDisplay::Timecode)).unwrap_or_default();
     json!({
         "id": c.id.0,
         "start": c.start.0,
         "end": c.end().0,
-        "in": tc(c.start),
-        "out": tc(c.end()),
-        "duration": tc(c.duration),
+        "in": clock.timecode(c.start),
+        "out": clock.timecode(c.end()),
+        "duration": clock.duration(c.duration),
         "text": c.text,
         "speaker": c.speaker,
         "settings": c.settings,

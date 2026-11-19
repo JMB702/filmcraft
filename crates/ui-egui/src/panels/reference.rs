@@ -9,7 +9,7 @@
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use filmcraft_scopes::ScopeKind;
-use filmcraft_time::{Tick, TimeDisplay, format_time};
+use filmcraft_time::Tick;
 
 use crate::FilmcraftApp;
 use crate::frames::{FrameKey, Target};
@@ -91,7 +91,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     // ---- control bar: timecode · ◀ ▶ · Match Playhead · Gang · [Composite Video ▾]
     let bar = Rect::from_min_max(pos2(rect.min.x, area.max.y + 4.0), rect.max);
-    let tc = format_time(rate.tick_of(frame), rate, q.settings.drop_frame, TimeDisplay::Timecode, 48000);
+    let tc = q.clock().timecode(rate.tick_of(frame));
     let tr = ui.painter().text(pos2(bar.min.x + 10.0, bar.center().y), Align2::LEFT_CENTER, &tc, Tokens::timecode(), t.timecode);
     elems.push(("reference.timecode".into(), tr, tc.clone()));
     let mut step = 0i64;

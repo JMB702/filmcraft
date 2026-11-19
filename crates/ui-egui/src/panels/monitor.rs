@@ -9,7 +9,7 @@
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_project::ItemKind;
-use filmcraft_time::{Tick, TimeDisplay, format_time};
+use filmcraft_time::Tick;
 use serde_json::json;
 
 use crate::FilmcraftApp;
@@ -33,8 +33,7 @@ struct PictureCtx {
     rate: filmcraft_time::FrameRate,
     time: Tick,
     duration: Tick,
-    drop_frame: bool,
-    time_display: TimeDisplay,
+    clock: filmcraft_project::TimeClock,
     compare: bool,
     ref_area: Option<Rect>,
     pic: Rect,
@@ -45,7 +44,7 @@ struct PictureCtx {
 /// The picture block: schedules this frame's render request (GPU or CPU), shows the texture
 /// that is ready, and draws the safe margins, comparison reference and display-mode label.
 fn draw_picture(app: &mut FilmcraftApp, ui: &mut egui::Ui, which: Which, mv: &crate::state::MonitorView, pc: PictureCtx) {
-    let PictureCtx { target, frame_size, rate, time, duration, drop_frame, time_display, compare, ref_area, pic, video_area, prefix } = pc;
+    let PictureCtx { target, frame_size, rate, time, duration, clock, compare, ref_area, pic, video_area, prefix } = pc;
     let t = app.tokens;
     let ctx = ui.ctx().clone();
     let display = mv.display_mode().unwrap_or(DisplayMode::Composite);
@@ -165,7 +164,7 @@ fn draw_picture(app: &mut FilmcraftApp, ui: &mut egui::Ui, which: Which, mv: &cr
         }
         app.auto.add("program.compare.reference", rpic, "reference frame");
         let bar = Rect::from_min_max(pos2(ra.min.x, ra.max.y + 2.0), pos2(video_area.max.x, ra.max.y + 22.0));
-        monitor_view::compare_bar(app, ui, bar, rate, drop_frame, time_display);
+        monitor_view::compare_bar(app, ui, bar, &clock);
     }
     if mv.safe_margins {
         for (f, c) in [(0.9, Color32::from_white_alpha(120)), (0.8, Color32::from_white_alpha(90))] {
@@ -211,6 +210,23 @@ fn shown_view(saved: &crate::state::MonitorView, cinema: bool) -> crate::state::
         mv.show_rulers = false;
     }
     mv
+}
+
+/// The times a monitor shows: the sequence's Start Time on the Program monitor, the clip's own
+/// timecode (media start, drop-frame when flagged) on the Source monitor; plain zero-based
+/// timecode at `rate` when neither applies.
+fn monitor_clock(app: &FilmcraftApp, which: Which, rate: filmcraft_time::FrameRate, drop_frame: bool) -> filmcraft_project::TimeClock {
+    match which {
+        Which::Program => app.session.active_sequence().map(|q| q.clock()),
+        Which::Source => app
+            .session
+            .state
+            .source_item
+            .and_then(|i| app.session.project.item(i))
+            .and_then(|it| filmcraft_engine::panels::item_clock(&app.session.project, it)),
+    }
+    .filter(|c| c.rate == rate)
+    .unwrap_or_else(|| filmcraft_project::TimeClock::plain(rate, drop_frame))
 }
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which) {
@@ -271,6 +287,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     };
     // both monitors show time in the active sequence's Display Format
     let time_display = app.session.active_sequence().map(|q| q.settings.display).unwrap_or_default();
+    let clock = monitor_clock(app, which, rate, drop_frame).with_display(time_display);
     // Display implicit full-clip marks without writing them into the project on open.
     let draft = crate::panels::source_range::preview_for(app, &ctx, which);
     let (mark_in, mark_out) = if which == Which::Source {
@@ -365,13 +382,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     let saved_clip = ui.clip_rect();
     ui.set_clip_rect(saved_clip.intersect(if mv.zoom.is_some() && !compare && !cinema { video_area } else { picture_area.expand(12.0) }));
     if show_picture {
-        draw_picture(
-            app,
-            ui,
-            which,
-            &mv,
-            PictureCtx { target, frame_size, rate, time, duration, drop_frame, time_display, compare, ref_area, pic, video_area, prefix },
-        );
+        draw_picture(app, ui, which, &mv, PictureCtx { target, frame_size, rate, time, duration, clock, compare, ref_area, pic, video_area, prefix });
     }
     drop_indicator(app, ui, video_area, which, &t);
     if cinema {
@@ -418,8 +429,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     }
 
     // ---- controls row: timecode | zoom | res | wrench | duration
-    let dur_tc = format_time(mark_out.map(|o| o + rate.frame_duration()).unwrap_or(duration) - range_start, rate, drop_frame, time_display, 48000);
-    let (bar, zoom_bar) = controls_row(app, ui, rect, which, time, rate, drop_frame, time_display, origin, &dur_tc);
+    let dur_tc = clock.duration(mark_out.map(|o| o + rate.frame_duration()).unwrap_or(duration) - range_start);
+    let (bar, zoom_bar) = controls_row(app, ui, rect, which, time, &clock, origin, &dur_tc);
 
     // ---- mini timeline / scrub bar
     follow_playhead(app, which, origin, duration, time);
@@ -440,9 +451,7 @@ fn controls_row(
     rect: Rect,
     which: Which,
     time: Tick,
-    rate: filmcraft_time::FrameRate,
-    drop_frame: bool,
-    time_display: TimeDisplay,
+    clock: &filmcraft_project::TimeClock,
     origin: Tick,
     dur_tc: &str,
 ) -> (Rect, Rect) {
@@ -456,10 +465,10 @@ fn controls_row(
     let controls_h = 28.0 + 24.0 + 15.0 + 36.0 + if stacked_controls { 26.0 } else { 0.0 } + source_drag_h;
     // ---- controls row: timecode | zoom | res | wrench | duration
     let row1 = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.max.y - controls_h + 2.0), vec2(rect.width() - 28.0, 26.0));
-    let tc = format_time(time, rate, drop_frame, time_display, 48000);
+    let tc = clock.format(time);
     let tc_rect = Rect::from_min_size(row1.min, vec2(110.0, row1.height()));
     let min = if which == Which::Program { Tick::ZERO } else { origin };
-    match crate::widgets::timecode_field(ui, egui::Id::unique((prefix, "timecode")), tc_rect, &tc, time, min, rate, drop_frame, time_display, t.timecode) {
+    match crate::widgets::clock_field(ui, egui::Id::unique((prefix, "timecode")), tc_rect, &tc, time, min, clock, t.timecode) {
         Some(Ok(to)) => {
             let cmd = if which == Which::Program { "playhead.set" } else { "source.setPlayhead" };
             if let Err(e) = app.session.execute(cmd, json!({"time": to.0})) {

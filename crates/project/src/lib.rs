@@ -55,6 +55,7 @@ macro_rules! id_type {
     };
 }
 
+mod clock;
 mod item;
 mod label;
 mod sequence;
@@ -63,6 +64,7 @@ mod source;
 mod track;
 mod view;
 
+pub use clock::TimeClock;
 pub use item::{AudioChannelMap, Bin, BinEntry, Interpretation, ItemKind, MediaClip, MediaIdentity, MediaRef, ProjectItem};
 pub use label::Label;
 pub(crate) use sequence::bounded_time_range;

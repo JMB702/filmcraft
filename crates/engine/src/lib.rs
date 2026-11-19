@@ -1600,6 +1600,8 @@ mod shortcuts_tests;
 #[cfg(test)]
 mod split_edit_ripple_trim_tests;
 #[cfg(test)]
+mod start_timecode_tests;
+#[cfg(test)]
 mod stored_paths_tests;
 #[cfg(test)]
 mod tests;

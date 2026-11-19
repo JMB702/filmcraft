@@ -1,7 +1,7 @@
 use super::layout::Layout;
 use super::{
-    Align2, Color32, Drag, EDGE_PX, FilmcraftApp, Icon, ItemId, Rect, Sense, Sequence, Stroke, ThumbnailMode, Tick, TimeRange, Tokens, Value, format_time,
-    icons, json, marker_range_rect, marker_rect, pos2, vec2, work_area_rect,
+    Align2, Color32, Drag, EDGE_PX, FilmcraftApp, Icon, ItemId, Rect, Sense, Sequence, Stroke, ThumbnailMode, Tick, TimeRange, Tokens, Value, icons, json,
+    marker_range_rect, marker_rect, pos2, vec2, work_area_rect,
 };
 use crate::panels::timeline_hit::marker_end_rect;
 
@@ -29,22 +29,12 @@ pub(super) fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, se
     let ruler = layout.ruler;
     // background of the whole top block
     p.rect_filled(Rect::from_min_max(rect.min, pos2(rect.max.x, ruler.max.y)), 0.0, t.panel_bg);
-    // current timecode: Premiere's big blue timecode
-    let tc = format_time(app.session.playhead(), rate, seq.settings.drop_frame, seq.settings.display, seq.settings.sample_rate as i64);
+    // current timecode: Premiere's big blue timecode, in the sequence's Start Time
+    let clock = seq.clock();
+    let tc = clock.format(app.session.playhead());
     let tc_rect = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.min.y + 4.0), vec2(hw - 20.0, 20.0));
     let tc_id = egui::Id::unique(("timeline-tc", seq_id));
-    match crate::widgets::timecode_field(
-        ui,
-        tc_id,
-        tc_rect,
-        &tc,
-        app.session.playhead(),
-        Tick::ZERO,
-        rate,
-        seq.settings.drop_frame,
-        seq.settings.display,
-        t.timecode,
-    ) {
+    match crate::widgets::clock_field(ui, tc_id, tc_rect, &tc, app.session.playhead(), Tick::ZERO, &clock, t.timecode) {
         Some(Ok(time)) => {
             if let Err(e) = app.session.execute("playhead.set", json!({"time": time.0})) {
                 app.ui.status = e.to_string();
@@ -118,19 +108,19 @@ pub(super) fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, se
         let side = if is_in { "In" } else { "Out" };
         app.auto.add(&format!("timeline.split.{kind}{side}"), Rect::from_center_size(pos2(x, y0 + 3.5), vec2(12.0, 9.0)), &format!("Split {tag} {side}"));
     }
-    let f0 = rate.frame_at(layout.tick_at(ruler.min.x)).max(0);
-    let f1 = rate.frame_at(layout.tick_at(ruler.max.x)) + 1;
-    let mut f = (f0 / minor) * minor;
-    while f <= f1 {
-        let x = layout.x_of(rate.tick_of(f));
-        let major = f % label_step == 0;
+    // ticks and labels on round displayed frames (Start Time added), not on round sequence frames
+    let clock = seq.clock().with_display(seq.settings.display);
+    let from = layout.tick_at(ruler.min.x).max(Tick::ZERO);
+    let to = layout.tick_at(ruler.max.x) + rate.frame_duration();
+    // a minor step is a few pixels at least: the cap only stops damaged numbers spinning
+    for (at, n) in clock.ruler_marks(from, to, minor, 100_000) {
+        let x = layout.x_of(at);
+        let major = n.rem_euclid(label_step) == 0;
         let h = if major { 10.0 } else { 4.0 };
         clip.line_segment([pos2(x, tick_base - h), pos2(x, tick_base)], Stroke::new(1.0, t.tl_ruler_tick));
         if major {
-            let label = format_time(rate.tick_of(f), rate, seq.settings.drop_frame, seq.settings.display, 48000);
-            clip.text(pos2(x + 1.0, label_y), Align2::CENTER_CENTER, label, Tokens::ui(11.0), t.tl_ruler_text);
+            clip.text(pos2(x + 1.0, label_y), Align2::CENTER_CENTER, clock.format(at), Tokens::ui(11.0), t.tl_ruler_text);
         }
-        f += minor;
     }
     // render bar
     // Per segment (engine `previews`): green = rendered preview, yellow = should play in real time,
@@ -170,12 +160,12 @@ pub(super) fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, se
             clip.rect_filled(Rect::from_center_size(pos2(x, r.center().y), vec2(3.0, r.height() + 2.0)), 1.0, t.text);
         }
         app.auto.add("timeline.workArea", r.intersect(ruler), "Work Area Bar");
-        let fmt = |tick: Tick| format_time(tick, rate, seq.settings.drop_frame, seq.settings.display, 48000);
+        let clock = seq.clock();
         if ui.rect_contains_pointer(r.expand2(vec2(EDGE_PX, 1.0)).intersect(ruler)) {
             egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique("work-area-tip"), egui::PopupAnchor::Pointer).show(|ui| {
-                ui.label(tlf!("Start: {tc}", tc = fmt(area.start)));
-                ui.label(tlf!("End: {tc}", tc = fmt(area.end())));
-                ui.label(tlf!("Duration: {tc}", tc = fmt(area.duration)));
+                ui.label(tlf!("Start: {tc}", tc = clock.format(area.start)));
+                ui.label(tlf!("End: {tc}", tc = clock.format(area.end())));
+                ui.label(tlf!("Duration: {tc}", tc = clock.duration(area.duration)));
             });
         }
     }

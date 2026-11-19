@@ -385,7 +385,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // the ruler and the clip's bar, painted after the rows so rows scrolled up under them (their
     // lines and keyframes) stay hidden
     ui.painter().rect_filled(Rect::from_min_max(lane.min, pos2(lane.max.x, bar.max.y)), 0.0, t.tl_bg);
-    paint_ruler(ui.painter(), ruler, &it, rate, seq.settings.drop_frame, &t);
+    paint_ruler(ui.painter(), ruler, &it, &seq.clock(), &t);
     ui.painter().rect_filled(bar.shrink2(vec2(0.0, 2.0)), 2.0, t.clip_bar_bg);
     ui.painter().with_clip_rect(bar).text(pos2(bar.min.x + 4.0, bar.center().y), Align2::LEFT_CENTER, &it.name, Tokens::ui(10.0), t.text);
     // click or drag anywhere on the ruler (or the bar) to move the playhead (after the rows, which
@@ -418,7 +418,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add("effectControls.playhead", Rect::from_min_max(pos2(px - 5.0, top), pos2(px + 5.0, tip)), "playhead");
     }
     // footer timecode
-    let tc = filmcraft_time::format_time(ph, seq.settings.frame_rate, seq.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48000);
+    let tc = seq.clock().timecode(ph);
     ui.painter().text(pos2(rect.min.x + 10.0, rect.max.y - 13.0), Align2::LEFT_CENTER, tc, Tokens::mono(13.0), t.timecode);
     keys.finish(app, ui);
     run(app, ui.ctx(), actions);
@@ -473,7 +473,9 @@ fn seq_name(app: &FilmcraftApp) -> String {
 
 /// The keyframe lane's time ruler: ticks and sequence timecode across the clip's stretch of the
 /// timeline (the lane shows exactly the clip, so the ruler starts at the clip's start).
-fn paint_ruler(p: &egui::Painter, ruler: Rect, it: &TrackItem, rate: filmcraft_time::FrameRate, drop_frame: bool, t: &Tokens) {
+/// Times are labelled in `clock` (the sequence's Start Time), on round displayed frames.
+fn paint_ruler(p: &egui::Painter, ruler: Rect, it: &TrackItem, clock: &filmcraft_project::TimeClock, t: &Tokens) {
+    let rate = clock.rate;
     let p = p.with_clip_rect(ruler);
     let dur = it.duration.0.max(1) as f64;
     let frame_px = ruler.width() as f64 * rate.frame_duration().0.max(1) as f64 / dur;
@@ -500,23 +502,17 @@ fn paint_ruler(p: &egui::Painter, ruler: Rect, it: &TrackItem, rate: filmcraft_t
     // labels far enough apart to read; the small ticks divide the labelled ones evenly
     let label_step = steps.iter().copied().find(|s| *s > 0 && *s as f64 * frame_px >= 80.0);
     let minor = steps.iter().copied().find(|s| *s > 0 && *s as f64 * frame_px >= 8.0 && label_step.is_none_or(|l| l % s == 0));
-    let (f0, f1) = (rate.frame_at(it.start), rate.frame_at(it.end()));
+    let (from, to) = (it.start, it.end());
     let base_y = ruler.max.y - 1.0;
     for (step, h, labelled) in [(minor, 3.0, false), (label_step, 7.0, true)] {
         let Some(step) = step else { continue };
-        let mut f = f0.div_euclid(step).saturating_mul(step);
         // a step is at least 8 px wide, so this covers any ruler; the cap is for damaged numbers
-        for _ in 0..4096 {
-            if f > f1 {
-                break;
-            }
-            let x = ruler.min.x + ((rate.tick_of(f) - it.start).0 as f64 / dur) as f32 * ruler.width();
+        for (at, _) in clock.with_display(filmcraft_time::TimeDisplay::Timecode).ruler_marks(from, to, step, 4096) {
+            let x = ruler.min.x + ((at - it.start).0 as f64 / dur) as f32 * ruler.width();
             p.line_segment([pos2(x, base_y - h), pos2(x, base_y)], Stroke::new(1.0, t.tl_ruler_tick));
             if labelled {
-                let label = filmcraft_time::format_time(rate.tick_of(f), rate, drop_frame, filmcraft_time::TimeDisplay::Timecode, 48000);
-                p.text(pos2(x, ruler.min.y + 7.0), Align2::CENTER_CENTER, label, Tokens::ui(10.0), t.tl_ruler_text);
+                p.text(pos2(x, ruler.min.y + 7.0), Align2::CENTER_CENTER, clock.timecode(at), Tokens::ui(10.0), t.tl_ruler_text);
             }
-            f = f.saturating_add(step);
         }
     }
 }
@@ -1766,7 +1762,7 @@ mod lane_tests {
                             it.start = Tick(start);
                             it.duration = Tick(duration);
                             let ruler = Rect::from_min_size(pos2(10.0, 10.0), vec2(width, RULER_H));
-                            paint_ruler(ui.painter(), ruler, &it, filmcraft_time::FrameRate { num, den }, false, &t);
+                            paint_ruler(ui.painter(), ruler, &it, &filmcraft_project::TimeClock::plain(filmcraft_time::FrameRate { num, den }, false), &t);
                         }
                     }
                 }
@@ -1787,7 +1783,7 @@ mod lane_tests {
         let ctx = context();
         let t = Tokens::for_kind(Default::default());
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_ruler(ui.painter(), Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, RULER_H)), &it, rate, false, &t);
+            paint_ruler(ui.painter(), Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, RULER_H)), &it, &filmcraft_project::TimeClock::plain(rate, false), &t);
         });
         out.textures_delta.clear();
         fn texts(s: egui::Shape, out: &mut Vec<String>) {
@@ -1800,6 +1796,38 @@ mod lane_tests {
         let mut labels = Vec::new();
         out.shapes.into_iter().for_each(|c| texts(c.shape, &mut labels));
         assert_eq!(labels, ["00:01:00:00", "00:01:02:00", "00:01:04:00"]);
+    }
+
+    /// With a Start Time the labels show the displayed (drop-frame) time of day.
+    #[test]
+    fn ruler_labels_add_the_sequence_start_time() {
+        let mut s = filmcraft_engine::Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let mut it = s.active_sequence().unwrap().video_tracks[0].items[0].clone();
+        let rate = filmcraft_time::FrameRate::FPS_29_97;
+        it.start = Tick::ZERO;
+        it.duration = rate.tick_of(30 * 5);
+        // 16:49:16;19 drop-frame
+        let start = filmcraft_time::parse_timecode("16:49:16;19", rate, true, 0).unwrap();
+        let clock = filmcraft_project::TimeClock { start: rate.tick_of(start), ..filmcraft_project::TimeClock::plain(rate, true) };
+        let ctx = context();
+        let t = Tokens::for_kind(Default::default());
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_ruler(ui.painter(), Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, RULER_H)), &it, &clock, &t);
+        });
+        out.textures_delta.clear();
+        fn texts(s: egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Vec(v) => v.into_iter().for_each(|s| texts(s, out)),
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                _ => {}
+            }
+        }
+        let mut labels = Vec::new();
+        out.shapes.into_iter().for_each(|c| texts(c.shape, &mut labels));
+        assert!(!labels.is_empty());
+        // the lane runs 16;49;16;19 to 16;49;21;19: labels on round seconds inside it, in order
+        assert_eq!(labels, ["16;49;18;00", "16;49;20;00"]);
     }
 }
 

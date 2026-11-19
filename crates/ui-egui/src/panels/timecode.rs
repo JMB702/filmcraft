@@ -10,7 +10,7 @@
 
 use egui::{Align2, Rect, Sense, pos2, vec2};
 use filmcraft_project::ItemKind;
-use filmcraft_time::{FrameRate, Tick, TimeDisplay, format_time};
+use filmcraft_time::{Tick, TimeDisplay};
 
 use crate::FilmcraftApp;
 use crate::dock::PanelKind;
@@ -27,54 +27,43 @@ pub fn row_text(app: &FilmcraftApp, row: &TimecodeRow) -> (String, String) {
     };
     struct View {
         name: String,
-        rate: FrameRate,
-        df: bool,
+        /// The panel's own times: the sequence's Start Time, or the source clip's timecode.
+        clock: filmcraft_project::TimeClock,
         t: Tick,
         dur: Tick,
         marks: (Option<Tick>, Option<Tick>),
-        /// The media timecode at `t` (None = no clip there).
-        media: Option<(Tick, FrameRate)>,
-        sample_rate: i64,
+        /// The media timecode at `t`, in that media's clock (None = no clip there).
+        media: Option<(Tick, filmcraft_project::TimeClock)>,
     }
     let view = match source {
         TcSource::Source => s.state.source_item.and_then(|i| s.project.item(i)).map(|it| {
-            let start = it.as_media().and_then(|m| m.info.start_timecode).map(|f| it.frame_rate().tick_of(f)).unwrap_or_default();
             let marks = match &it.kind {
                 ItemKind::Media(m) => (m.mark_in, m.mark_out),
                 ItemKind::Sequence(q) => (q.mark_in, q.mark_out),
                 _ => (None, None),
             };
             let sr = it.as_media().and_then(|m| m.info.audio()).map(|a| a.sample_rate as i64).unwrap_or(48000);
-            View {
-                name: it.name.clone(),
-                rate: it.frame_rate(),
-                df: false,
-                t: s.state.source_playhead,
-                dur: it.duration(),
-                marks,
-                media: Some((start + s.state.source_playhead, it.frame_rate())),
-                sample_rate: sr,
-            }
+            let rate = it.frame_rate();
+            let clock = filmcraft_engine::panels::item_clock(&s.project, it)
+                .filter(|c| c.rate == rate)
+                .unwrap_or_else(|| filmcraft_project::TimeClock::plain(rate, false));
+            let clock = filmcraft_project::TimeClock { display: row.display, sample_rate: sr, ..clock };
+            View { name: it.name.clone(), clock, t: s.state.source_playhead, dur: it.duration(), marks, media: Some((s.state.source_playhead, clock)) }
         }),
         _ => s.active_sequence().map(|q| {
             let t = s.playhead();
             // the topmost enabled video clip under the playhead
             let media = q.video_tracks.iter().rev().find_map(|tr| tr.item_at(t).filter(|c| c.enabled)).and_then(|c| {
-                let it = s.project.item(c.item)?;
-                let m = it.as_media()?;
-                let rate = m.frame_rate();
-                let start = m.info.start_timecode.map(|f| rate.tick_of(f)).unwrap_or_default();
-                Some((start + c.source_time_at(t), rate))
+                let m = s.project.item(c.item)?.as_media()?;
+                Some((c.source_time_at(t), m.clock().with_display(row.display)))
             });
             View {
                 name: s.state.active_sequence.and_then(|i| s.project.item(i)).map(|i| i.name.clone()).unwrap_or_default(),
-                rate: q.settings.frame_rate,
-                df: q.settings.drop_frame,
+                clock: q.clock().with_display(row.display),
                 t,
                 dur: q.duration(),
                 marks: (q.mark_in, q.mark_out),
                 media,
-                sample_rate: q.settings.sample_rate as i64,
             }
         }),
     };
@@ -82,17 +71,16 @@ pub fn row_text(app: &FilmcraftApp, row: &TimecodeRow) -> (String, String) {
         let mode = crate::i18n::t(row.mode.label());
         return ("--:--:--:--".into(), if source == TcSource::Source { tlf!("{mode} · no clip", mode) } else { tlf!("{mode} · no sequence", mode) });
     };
-    let fmt = |t: Tick, rate: FrameRate, df: bool| format_time(t, rate, df, row.display, v.sample_rate);
     let (a, b) = (v.marks.0.unwrap_or(Tick::ZERO), v.marks.1.unwrap_or(v.dur));
     let value = match row.mode {
-        TcMode::Current => fmt(v.t, v.rate, v.df),
+        TcMode::Current => v.clock.format(v.t),
         TcMode::Media => match v.media {
-            Some((t, r)) => fmt(t, r, false),
+            Some((t, c)) => c.format(t),
             None => "--:--:--:--".into(),
         },
-        TcMode::Duration => fmt(v.dur, v.rate, v.df),
-        TcMode::InOut => fmt((b - a).max(Tick::ZERO), v.rate, v.df),
-        TcMode::Remaining => fmt((b - v.t).max(Tick::ZERO), v.rate, v.df),
+        TcMode::Duration => v.clock.duration(v.dur),
+        TcMode::InOut => v.clock.duration((b - a).max(Tick::ZERO)),
+        TcMode::Remaining => v.clock.duration((b - v.t).max(Tick::ZERO)),
     };
     let src = match source {
         TcSource::Source => tl!("Source"),

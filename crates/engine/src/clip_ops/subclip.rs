@@ -213,39 +213,72 @@ pub(super) fn audio_channels(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 pub(super) fn modify_timecode(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "clip.modifyTimecode";
     let item = item_p(p, "item")
         .or_else(|| s.state.project_selection.iter().copied().find(|i| s.project.item(*i).and_then(|it| it.as_media()).is_some()))
-        .ok_or_else(|| bad("clip.modifyTimecode", "select a clip"))?;
-    let m = s.project.item(item).and_then(|i| i.as_media()).ok_or_else(|| bad("clip.modifyTimecode", "not a media clip"))?;
+        .ok_or_else(|| bad(CMD, "select a clip"))?;
+    let m = s.project.item(item).and_then(|i| i.as_media()).ok_or_else(|| bad(CMD, "not a media clip"))?;
     let rate = m.frame_rate();
     let reset = bool_p(p, "reset").unwrap_or(false);
+    // Time Display Format: drop-frame or non-drop counting for the typed timecode and for every
+    // later display of the clip's timecode; absent = keep the clip's current setting
+    let drop_frame = match p.get("dropFrame") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| bad(CMD, "`dropFrame` must be true or false"))?),
+    };
+    if drop_frame == Some(true) && !rate.supports_drop_frame() {
+        return Err(bad(CMD, format!("drop-frame timecode needs a 29.97, 59.94 or 119.88 fps clip, not {rate}")));
+    }
+    let df = drop_frame.unwrap_or_else(|| m.timecode_drop_frame());
     let frame = if let Some(tc) = str_p(p, "timecode") {
-        Some(parse_timecode(tc, rate, false, 0).map_err(|e| bad("clip.modifyTimecode", format!("timecode: {e:?}")))?)
+        Some(parse_timecode(tc, rate, df, 0).map_err(|e| bad(CMD, format!("timecode: {e}")))?)
     } else {
-        p.get("frame").and_then(Value::as_i64)
+        match p.get("frame") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v.as_i64().ok_or_else(|| bad(CMD, "`frame` must be a whole number of frames"))?),
+        }
     };
     let tape = str_p(p, "tapeName").map(str::to_string);
-    if frame.is_none() && tape.is_none() && !reset {
-        return Err(bad("clip.modifyTimecode", "need `timecode`, `frame`, `tapeName` or `reset`"));
+    if frame.is_none() && tape.is_none() && drop_frame.is_none() && !reset {
+        return Err(bad(CMD, "need `timecode`, `frame`, `dropFrame`, `tapeName` or `reset`"));
     }
     if frame.is_some_and(|f| f < 0) {
-        return Err(bad("clip.modifyTimecode", "timecode must not be negative"));
+        return Err(bad(CMD, "timecode must not be negative"));
+    }
+    // a start whose frame boundary is past the tick range would saturate every later time
+    if frame.is_some_and(|f| rate.frame_at(rate.tick_of(f)) != f || rate.tick_of(f) >= Tick::MAX) {
+        return Err(bad(CMD, "timecode is too large"));
     }
     const FILE_TC: &str = "File Timecode";
+    const FILE_DF: &str = "File Timecode Drop Frame";
     let r = s.edit("Modify Timecode", |pr, _| {
-        let it = pr.item_mut(item).ok_or_else(|| bad("clip.modifyTimecode", "no such item"))?;
+        let it = pr.item_mut(item).ok_or_else(|| bad(CMD, "no such item"))?;
         let cur = it.as_media().and_then(|m| m.info.start_timecode);
+        let cur_df = it.as_media().and_then(|m| m.interpret.timecode_drop_frame);
         if reset {
-            // back to the file's own timecode ("none" = the file had none)
+            // back to the file's own timecode ("none" = the file had none) and its counting
             if let Some(orig) = it.metadata.remove(FILE_TC)
                 && let Some(m) = it.as_media_mut()
             {
                 m.info.start_timecode = orig.parse::<i64>().ok();
             }
-        } else if let Some(f) = frame {
-            it.metadata.entry(FILE_TC.to_string()).or_insert_with(|| cur.map(|c| c.to_string()).unwrap_or_else(|| "none".into()));
-            if let Some(m) = it.as_media_mut() {
-                m.info.start_timecode = Some(f);
+            if let Some(orig) = it.metadata.remove(FILE_DF)
+                && let Some(m) = it.as_media_mut()
+            {
+                m.interpret.timecode_drop_frame = orig.parse::<bool>().ok();
+            }
+        } else {
+            if let Some(f) = frame {
+                it.metadata.entry(FILE_TC.to_string()).or_insert_with(|| cur.map(|c| c.to_string()).unwrap_or_else(|| "none".into()));
+                if let Some(m) = it.as_media_mut() {
+                    m.info.start_timecode = Some(f);
+                }
+            }
+            if let Some(d) = drop_frame {
+                it.metadata.entry(FILE_DF.to_string()).or_insert_with(|| cur_df.map(|c| c.to_string()).unwrap_or_else(|| "none".into()));
+                if let Some(m) = it.as_media_mut() {
+                    m.interpret.timecode_drop_frame = Some(d);
+                }
             }
         }
         if let Some(t) = &tape {
@@ -255,7 +288,13 @@ pub(super) fn modify_timecode(s: &mut Session, p: &Value) -> Result<Value> {
                 it.metadata.insert("Tape Name".into(), t.clone());
             }
         }
-        Ok(it.as_media().and_then(|m| m.info.start_timecode))
+        Ok(it.as_media().map(|m| (m.info.start_timecode, m.timecode_drop_frame())))
     })?;
-    Ok(json!({"item": item.0, "startTimecode": r}))
+    let (start, df) = r.unwrap_or((None, false));
+    Ok(json!({
+        "item": item.0,
+        "startTimecode": start,
+        "dropFrame": df,
+        "timecode": start.map(|f| filmcraft_time::format_timecode_frames(f, rate, df)),
+    }))
 }
