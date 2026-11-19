@@ -1,5 +1,7 @@
-/* FilmCraft review page. Phone first: one column, 44 px targets, safe areas, the composer above
-   the on-screen keyboard (--kb is set by the page's wasm from visualViewport), no sideways scroll. */
+/* FilmCraft review page. Phone first: one column, 44 px targets, safe areas, no sideways scroll.
+   Without the script: the browser's player, a sticky stage and a composer fixed to the bottom.
+   With it (html.wasm): a page sized to the visible screen (--vvh/--vvtop, set by the page's wasm
+   from visualViewport), its own transport under the picture, and only the comment list scrolls. */
 :root {
   --bg: #101113;
   --panel: #18191c;
@@ -9,7 +11,6 @@
   --accent: #4f8cff;
   --mark: #36b3e8;
   --danger: #ff7a6b;
-  --kb: 0px;
   --compose-h: 76px;
   color-scheme: dark;
   -webkit-text-size-adjust: 100%;
@@ -60,9 +61,32 @@ button { font: inherit; color: inherit; }
 .step:active { background: var(--line); }
 .tc { text-align: center; font: 600 20px/1 ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
 
-/* Scrub bar with a tick per comment. The hit area is 44 px tall; the track is drawn thin. */
-.scrub { padding: 0 calc(16px + env(safe-area-inset-right)) 6px calc(16px + env(safe-area-inset-left)); touch-action: none; }
-.track { position: relative; height: 44px; cursor: pointer; }
+/* Transport under the picture: play, the scrub bar with a tick per comment, full screen. The hit
+   areas are 44 px; the track is drawn thin. */
+.scrub {
+  display: flex; align-items: center; gap: 4px;
+  padding: 2px calc(6px + env(safe-area-inset-right)) 0 calc(6px + env(safe-area-inset-left));
+}
+.track { flex: 1; min-width: 0; margin: 0 8px; position: relative; height: 44px; cursor: pointer; touch-action: none; }
+.ic {
+  flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 22px; background: none;
+  display: grid; place-items: center; touch-action: manipulation; cursor: pointer;
+}
+.ic:active { background: var(--line); }
+.ic::before { content: ""; display: block; }
+/* Icons drawn in CSS (no icon files): play is a triangle, pause two bars, full screen four corners. */
+.pp::before { width: 16px; height: 18px; margin-left: 3px; background: currentColor; clip-path: polygon(0 0, 100% 50%, 0 100%); }
+.pp.playing::before {
+  width: 14px; height: 16px; margin-left: 0; clip-path: none;
+  background: linear-gradient(90deg, currentColor 0 35%, transparent 35% 65%, currentColor 65% 100%);
+}
+.fs::before {
+  --c: linear-gradient(currentColor, currentColor);
+  width: 18px; height: 18px; background-repeat: no-repeat;
+  background-image: var(--c), var(--c), var(--c), var(--c), var(--c), var(--c), var(--c), var(--c);
+  background-size: 6px 2px, 2px 6px, 6px 2px, 2px 6px, 6px 2px, 2px 6px, 6px 2px, 2px 6px;
+  background-position: 0 0, 0 0, 100% 0, 100% 0, 0 100%, 0 100%, 100% 100%, 100% 100%;
+}
 .track::before { content: ""; position: absolute; left: 0; right: 0; top: 20px; height: 4px; border-radius: 2px; background: var(--line); }
 .fill { position: absolute; left: 0; top: 20px; height: 4px; width: 0; border-radius: 2px; background: var(--accent); }
 .head { position: absolute; top: 13px; width: 18px; height: 18px; margin-left: -9px; left: 0; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px #0008; pointer-events: none; }
@@ -83,10 +107,9 @@ button { font: inherit; color: inherit; }
 .c-a .del { color: var(--danger); }
 .empty { color: var(--dim); text-align: center; padding: 28px 0; margin: 0; }
 
-/* The composer is fixed to the bottom and rides above the on-screen keyboard. */
+/* Without the script the composer is fixed to the bottom; with it, it ends the page (below). */
 .composer {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-  transform: translateY(calc(-1 * var(--kb)));
   padding: 8px calc(12px + env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
   background: rgba(16, 17, 19, .96); border-top: 1px solid var(--line);
   -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
@@ -98,7 +121,7 @@ button { font: inherit; color: inherit; }
   background: var(--panel); color: var(--text); font: inherit; font-size: 16px; /* 16 px: iOS does not zoom */
 }
 .in:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.txtin { flex: 1; min-width: 0; resize: none; max-height: 30dvh; line-height: 1.35; }
+.txtin { flex: 1; min-width: 0; resize: none; max-height: min(30dvh, 132px); line-height: 1.35; }
 .send {
   min-width: 64px; min-height: 44px; padding: 0 16px; border: 0; border-radius: 12px;
   background: var(--accent); color: #fff; font-weight: 600; touch-action: manipulation;
@@ -127,9 +150,49 @@ html.wasm .namerow.known { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 
-/* Wider screens: the same column, centred. */
+/* Wider screens without the script: the same column, centred. */
 @media (min-width: 900px) {
-  .top, .tools, .scrub, .feed { max-width: 960px; margin-left: auto; margin-right: auto; }
-  .stage video { max-height: 70vh; }
-  .composer { left: 50%; right: auto; width: min(960px, 100vw); transform: translate(-50%, calc(-1 * var(--kb))); border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+  html:not(.wasm) :is(.top, .tools, .scrub, .feed) { max-width: 960px; margin-left: auto; margin-right: auto; }
+  html:not(.wasm) .stage video { max-height: 70vh; }
+  html:not(.wasm) .composer { left: 50%; right: auto; width: min(960px, 100vw); transform: translateX(-50%); border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+}
+
+/* The scripted page fits the visible screen: the video stays at the top, only the comment list
+   scrolls, and the composer ends the page, so it sits right above the on-screen keyboard (iOS
+   keeps the layout viewport and shrinks the visual one; --vvh and --vvtop follow it). */
+html.wasm { height: 100%; overflow: hidden; }
+html.wasm body {
+  position: fixed; left: 0; right: 0; top: var(--vvtop, 0px); height: var(--vvh, 100dvh);
+  min-height: 0; padding-bottom: 0; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+html.wasm :is(.top, .stage, .scrub, .tools, .composer) { flex: none; }
+html.wasm .stage { position: static; }
+html.wasm .stage video { cursor: pointer; max-height: min(62dvh, calc(var(--vvh, 100dvh) - 340px)); }
+html.wasm .feed { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+html.wasm .c { scroll-margin-top: 8px; }
+html.wasm .composer { position: static; }
+/* Keyboard up: the header and transport step aside so the video, the list and the composer fit;
+   the keyboard covers the home-indicator inset. */
+html.wasm.kb :is(.top, .scrub, .tools) { display: none; }
+html.wasm.kb .stage video { max-height: max(96px, calc(var(--vvh, 100dvh) - 220px)); }
+html.wasm.kb .composer { padding-bottom: 8px; }
+
+/* Wide screens, and phones on their side: the comments beside the picture. */
+@media (min-width: 900px), (orientation: landscape) and (max-height: 500px) {
+  html.wasm body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) clamp(300px, 40vw, 440px);
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "top top" "stage feed" "scrub feed" "tools composer";
+  }
+  html.wasm .top { grid-area: top; border-bottom: 1px solid var(--line); }
+  html.wasm .stage { grid-area: stage; min-height: 0; }
+  html.wasm .stage video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
+  html.wasm .scrub { grid-area: scrub; }
+  html.wasm .tools { grid-area: tools; align-self: center; padding-bottom: calc(4px + env(safe-area-inset-bottom)); }
+  html.wasm .feed { grid-area: feed; border-left: 1px solid var(--line); }
+  html.wasm .composer { grid-area: composer; border-left: 1px solid var(--line); }
+  /* the timecode is right beside it, under the picture; the comment box gets the room */
+  html.wasm .composer .at-chip { display: none; }
 }

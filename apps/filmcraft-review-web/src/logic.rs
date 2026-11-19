@@ -206,12 +206,35 @@ pub fn store_own(ids: &[String]) -> String {
     ids[skip..].join(",")
 }
 
-/// The keyboard's height over the layout viewport (iOS Safari keeps the layout and shrinks the
-/// visual viewport; Android Chrome with `interactive-widget=resizes-content` resizes the layout,
-/// which gives 0 here).
-pub fn keyboard_offset(inner_height: f64, vv_height: f64, vv_offset_top: f64) -> f64 {
-    let kb = inner_height - vv_height - vv_offset_top;
-    if kb.is_finite() && kb > 1.0 { kb.round() } else { 0.0 }
+/// The scripted page's box (review.css `html.wasm body`): it is sized to the part of the screen
+/// the reviewer can see, so the video stays at the top, only the comment list scrolls and the
+/// composer sits right above the on-screen keyboard. iOS Safari keeps the layout viewport when the
+/// keyboard opens and shrinks (and may shift) the visual viewport, which this follows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shell {
+    /// Height in CSS px.
+    pub height: f64,
+    /// Offset from the layout viewport's top in CSS px.
+    pub top: f64,
+    /// The on-screen keyboard is up (a text field has focus and the view shrank): the page drops
+    /// its header and transport so the video, the list and the composer still fit.
+    pub keyboard: bool,
+}
+
+/// Keyboard detection: the view has to shrink by more than this while a field has focus.
+const KEYBOARD_MIN: f64 = 120.0;
+
+/// The shell box from `window.innerHeight` and `visualViewport` (height, offsetTop, scale).
+/// `None`: leave the page at its normal size (nothing usable, or the reviewer pinch-zoomed and
+/// needs to pan around).
+pub fn shell(inner_height: f64, vv_height: f64, vv_offset_top: f64, vv_scale: f64, typing: bool) -> Option<Shell> {
+    let usable = |v: f64| v.is_finite() && v > 0.0;
+    if !usable(inner_height) || !usable(vv_height) || !vv_offset_top.is_finite() || !usable(vv_scale) || (vv_scale - 1.0).abs() > 0.01 {
+        return None;
+    }
+    let height = vv_height.min(inner_height).round();
+    let top = vv_offset_top.max(0.0).round();
+    Some(Shell { height, top, keyboard: typing && inner_height - height > KEYBOARD_MIN })
 }
 
 /// The error text of a failed request: the server's `{"error": …}`, else a generic one.
@@ -357,11 +380,23 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_rides_the_keyboard_and_errors_read_well() {
-        assert_eq!(keyboard_offset(800.0, 450.0, 0.0), 350.0);
-        assert_eq!(keyboard_offset(800.0, 800.0, 0.0), 0.0);
-        assert_eq!(keyboard_offset(800.0, 900.0, 0.0), 0.0);
-        assert_eq!(keyboard_offset(f64::NAN, 1.0, 0.0), 0.0);
+    fn the_page_fits_the_visible_screen_and_errors_read_well() {
+        // keyboard up while typing: the page is the part above it, shifted where iOS scrolled
+        assert_eq!(shell(812.0, 430.4, 0.0, 1.0, true), Some(Shell { height: 430.0, top: 0.0, keyboard: true }));
+        assert_eq!(shell(812.0, 430.0, 96.0, 1.0, true), Some(Shell { height: 430.0, top: 96.0, keyboard: true }));
+        // the same shrink without a focused field (toolbar, split view) is not a keyboard
+        assert_eq!(shell(812.0, 430.0, 0.0, 1.0, false), Some(Shell { height: 430.0, top: 0.0, keyboard: false }));
+        // a small shrink (Safari's toolbar) is not a keyboard either
+        assert_eq!(shell(812.0, 760.0, 0.0, 1.0, true), Some(Shell { height: 760.0, top: 0.0, keyboard: false }));
+        assert_eq!(shell(812.0, 900.0, -5.0, 1.0, false), Some(Shell { height: 812.0, top: 0.0, keyboard: false }));
+        // pinch zoom: leave the page alone so the reviewer can pan
+        assert_eq!(shell(812.0, 406.0, 100.0, 2.0, false), None);
+        for bad in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            assert_eq!(shell(bad, 400.0, 0.0, 1.0, true), None);
+            assert_eq!(shell(812.0, bad, 0.0, 1.0, true), None);
+            assert_eq!(shell(812.0, 400.0, 0.0, bad, true), None);
+        }
+        assert_eq!(shell(812.0, 400.0, f64::NAN, 1.0, true), None);
         assert_eq!(error_text(429, r#"{"error":"Too many comments at once."}"#), "Too many comments at once.");
         assert_eq!(error_text(500, "<html>"), "The comment was not posted (error 500).");
         assert!(error_text(0, "").starts_with("No connection"));

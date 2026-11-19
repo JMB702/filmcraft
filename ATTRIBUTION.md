@@ -123,6 +123,7 @@ is traced or derived from Adobe artwork.
 | Color Grading "Look" presets (Teal & Orange, Warm Film, …) | `crates/render/src/effects.rs` (`apply_look`): procedural colour transforms, not LUT files |
 | Color Grading Presets (Effects panel: Cinematic, Film Emulation, Monochrome, Technical) and their preview picture | `crates/render/src/lumetri_presets.rs`: Color Grading parameter values chosen by contributors, descriptive names, and a procedural preview picture (dusk sky, ridges, lake, grey ramp, colour chips) |
 | Colour palette and layout metrics | `crates/ui-egui/src/theme.rs`: colour values and sizes only; no artwork |
+| Review page controls (play and pause, full screen, scrub bar, spinner) | `crates/review/src/server/review.css`: generic shapes drawn with CSS gradients and clip paths; no icon files |
 
 ## Optional build input: craft-fonts
 
