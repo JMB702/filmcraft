@@ -113,6 +113,13 @@ fn has_edit_points(s: &Session) -> std::result::Result<(), String> {
     if s.state.edit_points.is_empty() { Err("no edit points selected".into()) } else { Ok(()) }
 }
 
+fn can_share_for_review(s: &Session) -> std::result::Result<(), String> {
+    has_seq(s)?;
+    if s.review.dir.is_none() {
+        return Err("review links are not available in this build".into());
+    }
+    has_saved_path(s)
+}
 fn has_saved_path(s: &Session) -> std::result::Result<(), String> {
     if s.path.is_some() { Ok(()) } else { Err("the project has not been saved yet".into()) }
 }
@@ -3115,6 +3122,39 @@ fn build() -> Vec<CommandSpec> {
             })?;
             Ok(Value::Null)
         }),
+        // ================= Review links =================
+        cmd!(
+            "review.share",
+            "Share for Review…",
+            ["File"],
+            None,
+            r#"{"sequence":id?,"range":"entire|inOut"?,"expiresDays":u32?} (renders the sequence for phones, starts the review server, returns and copies the link)"#,
+            can_share_for_review,
+            crate::review::share
+        ),
+        query!("review.list", "List Review Links", r#"{"all":bool=false}"#, crate::review::list),
+        cmd!("review.revoke", "Revoke Review Link", [], None, r#"{"share":str}"#, always, crate::review::revoke),
+        cmd!("review.sync", "Apply Review Comments", [], None, "{} (adds the markers of comments that arrived for the open project)", always, |s, _| {
+            crate::review::sync(s)
+        }),
+        cmd!(
+            "review.config",
+            "Review Link Settings",
+            [],
+            None,
+            r#"{"port":u16?,"bind":"lan|local"?,"publicBaseUrl":str?,"expireDays":u32?}"#,
+            always,
+            crate::review::config
+        ),
+        cmd!(
+            "review.funnel",
+            "Review Links Through Tailscale Funnel",
+            [],
+            None,
+            r#"{"socket":str?,"use":bool?} (read-only Tailscale status and the setup steps; use: point links at the Funnel address)"#,
+            always,
+            crate::review::funnel
+        ),
         cmd!("colors.addCustom", "Add Custom Color", [], None, r#"{"color":hex,"name":str?}"#, always, crate::palette::add),
         cmd!(
             "markers.add",

@@ -1958,6 +1958,7 @@ dependencies = [
  "filmcraft-platform",
  "filmcraft-project",
  "filmcraft-render",
+ "filmcraft-review",
  "filmcraft-time",
  "filmcraft-ui-egui",
  "glob",
@@ -2138,6 +2139,7 @@ dependencies = [
  "filmcraft-media",
  "filmcraft-project",
  "filmcraft-render",
+ "filmcraft-review",
  "filmcraft-scopes",
  "filmcraft-speech",
  "filmcraft-testkit",
@@ -2378,6 +2380,30 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "filmcraft-review"
+version = "0.20.1"
+dependencies = [
+ "filmcraft-time",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "filmcraft-review-web"
+version = "0.20.1"
+dependencies = [
+ "filmcraft-review",
+ "filmcraft-time",
+ "js-sys",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

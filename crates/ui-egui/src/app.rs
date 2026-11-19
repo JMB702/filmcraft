@@ -18,6 +18,8 @@ mod keys;
 pub(crate) mod occlusion;
 mod playback;
 mod prefs;
+#[cfg(not(target_arch = "wasm32"))]
+mod review;
 mod textures;
 mod window;
 
@@ -73,6 +75,8 @@ impl FilmcraftApp {
             occlusion: occlusion::Guard::default(),
             #[cfg(not(target_arch = "wasm32"))]
             disk_waker: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            review_waker: None,
             synthetic_modifiers: egui::Modifiers::NONE,
             deferred: Vec::new(),
             ui_requests: Vec::new(),
@@ -296,10 +300,12 @@ impl FilmcraftApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_disk_watch(ctx, now);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.tick_review(ctx, now);
     }
 
     /// Apply engine events that change the active sequence/view, IME target, toast or project.
-    fn logic_session_events(&mut self) {
+    fn logic_session_events(&mut self, ctx: &egui::Context) {
         for ev in self.session.drain_events() {
             match ev {
                 filmcraft_engine::Event::OpenSequence(_) => {
@@ -320,6 +326,7 @@ impl FilmcraftApp {
                     self.show_panel(PanelKind::Source);
                 }
                 filmcraft_engine::Event::RevealInProject(item) => self.reveal_in_project(item),
+                filmcraft_engine::Event::CopyText(text) => ctx.copy_text(text),
                 filmcraft_engine::Event::Toast { message, .. } => self.status(message),
                 filmcraft_engine::Event::ProjectChanged { .. } => {}
             }
@@ -339,7 +346,7 @@ impl FilmcraftApp {
         let now = self.logic_clock(ctx);
         self.logic_control(ctx);
         self.logic_background(ctx, now);
-        self.logic_session_events();
+        self.logic_session_events(ctx);
         self.logic_command_inbox(ctx);
         self.advance_playback(ctx);
         self.advance_source_playback(ctx);

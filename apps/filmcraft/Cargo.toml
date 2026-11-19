@@ -25,6 +25,8 @@ filmcraft-render = { workspace = true }
 filmcraft-time = { workspace = true }
 filmcraft-gpu = { workspace = true }
 filmcraft-ui-egui = { workspace = true }
+# Review links: the review server runs as this program with `--review-server`.
+filmcraft-review = { workspace = true, features = ["server"] }
 filmcraft-platform = { workspace = true }
 # The live channel's announcements (src/live.rs), shared with filmcraft-cli.
 filmcraft-automation = { workspace = true }
