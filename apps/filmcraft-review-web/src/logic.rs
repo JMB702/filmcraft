@@ -73,6 +73,13 @@ impl Timing {
         self.clamp(frame.saturating_add(delta))
     }
 
+    /// `frame` moved by `seconds` (the ±10 s buttons), kept in the file. A whole number of
+    /// frames, so the jump lands on a frame like the one-frame steps do.
+    pub fn jump(&self, frame: i64, seconds: f64) -> i64 {
+        let n = timing::frame_at_seconds(self.rate, seconds.abs()).unwrap_or(0);
+        self.step(frame, if seconds < 0.0 { n.saturating_neg() } else { n })
+    }
+
     /// Position of `frame` on the scrub bar, 0–100 %. The last frame sits at the right end.
     pub fn percent(&self, frame: i64) -> f64 {
         if self.frames <= 1 {
@@ -292,6 +299,12 @@ mod tests {
         assert_eq!(t.step(0, -1), 0);
         assert_eq!(t.step(249, 1), 249);
         assert_eq!(t.step(10, i64::MAX), 249);
+        // ten seconds is 250 frames at 25 and 299 at 29.97; never past either end
+        let big = Timing::of(&info(25, 1, 1000)).unwrap();
+        assert_eq!((big.jump(0, 10.0), big.jump(400, -10.0), big.jump(100, -10.0), big.jump(900, 10.0)), (250, 150, 0, 999));
+        let ntsc = Timing::of(&info(30000, 1001, 9146)).unwrap();
+        assert_eq!((ntsc.jump(195, 10.0), ntsc.jump(195, -10.0)), (494, 0));
+        assert_eq!((big.jump(5, f64::NAN), big.jump(5, f64::INFINITY), big.jump(5, -1e300)), (5, 5, 5));
         // seeking to a frame shows that frame
         for f in [0, 1, 124, 249] {
             assert_eq!(t.frame_at(t.seek_to(f)), f);

@@ -51,15 +51,22 @@ button { font: inherit; color: inherit; }
 }
 
 .tools {
-  display: grid; grid-template-columns: 64px 1fr 64px; align-items: center; gap: 8px;
+  display: grid; grid-template-columns: 54px 44px minmax(0, 1fr) 44px 54px; align-items: center; gap: 4px;
   padding: 8px calc(12px + env(safe-area-inset-right)) 4px calc(12px + env(safe-area-inset-left));
 }
 .step {
-  min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel);
-  font-size: 15px; font-weight: 600; touch-action: manipulation;
+  min-height: 44px; padding: 0 2px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel);
+  font-size: 15px; font-weight: 600; white-space: nowrap; touch-action: manipulation;
 }
 .step:active { background: var(--line); }
-.tc { text-align: center; font: 600 20px/1 ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+.tc { text-align: center; white-space: nowrap; font: 600 clamp(14px, 4.6vw, 20px)/1 ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+
+/* Narrow phones (320 px): the five transport buttons and the timecode still fit on one row. */
+@media (max-width: 360px) {
+  .tools { grid-template-columns: 48px 40px minmax(0, 1fr) 40px 48px; padding-left: calc(8px + env(safe-area-inset-left)); padding-right: calc(8px + env(safe-area-inset-right)); }
+  .step { font-size: 13px; }
+  .tc { font-size: 15px; }
+}
 
 /* Transport under the picture: play, the scrub bar with a tick per comment, full screen. The hit
    areas are 44 px; the track is drawn thin. */

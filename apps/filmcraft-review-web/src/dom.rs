@@ -283,6 +283,14 @@ impl App {
         }
     }
 
+    /// Jump by `seconds` (the ±10 s buttons, J and L), playing on if it was playing.
+    fn jump(&mut self, seconds: f64) {
+        let f = self.timing.jump(self.frame(), seconds);
+        self.els.video.set_current_time(self.timing.seek_to(f));
+        self.shown = -1;
+        self.draw();
+    }
+
     fn seek(&mut self, frame: i64) {
         let _ = self.els.video.pause();
         self.els.video.set_current_time(self.timing.seek_to(frame));
@@ -587,6 +595,13 @@ fn wire_steps(app: &Shared) {
             });
         });
     }
+    for (id, seconds) in [("back10", -10.0f64), ("fwd10", 10.0)] {
+        let Some(Ok(b)) = with(app, |a| by_id::<HtmlElement>(&a.els.doc, id)) else { continue };
+        let a2 = app.clone();
+        listen(&b, "click", move |_: Event| {
+            with(&a2, |a| a.jump(seconds));
+        });
+    }
     let Some(at) = with(app, |a| a.els.at.clone()) else { return };
     let a2 = app.clone();
     listen(&at, "click", move |_: Event| {
@@ -608,7 +623,8 @@ fn wire_steps(app: &Shared) {
             }
         });
     });
-    // arrow keys step frames when not typing (Shift: ten frames); Space and K play and pause
+    // arrow keys step frames when not typing (Shift: ten frames); Space and K play and pause;
+    // J and L jump ten seconds back and forward
     let Some(doc) = with(app, |a| a.els.doc.clone()) else { return };
     let a2 = app.clone();
     listen(&doc, "keydown", move |e: KeyboardEvent| {
@@ -623,6 +639,12 @@ fn wire_steps(app: &Shared) {
             " " | "k" | "K" if tag != "BUTTON" && !e.ctrl_key() && !e.meta_key() => {
                 e.prevent_default();
                 with(&a2, |a| a.toggle_play());
+                return;
+            }
+            k @ ("j" | "J" | "l" | "L") if !e.ctrl_key() && !e.meta_key() => {
+                e.prevent_default();
+                let seconds = if k.eq_ignore_ascii_case("j") { -10.0 } else { 10.0 };
+                with(&a2, |a| a.jump(seconds));
                 return;
             }
             _ => return,
