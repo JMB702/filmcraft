@@ -62,6 +62,8 @@ struct App {
     restore: Option<(f64, bool)>,
     /// The comment to show once the video can seek (from `#c-<id>`).
     focus: Option<String>,
+    /// The play button's state as last drawn (`None`: draw it).
+    playing_shown: Option<bool>,
 }
 
 #[wasm_bindgen(start)]
@@ -217,6 +219,7 @@ async fn run() -> Result<(), String> {
         posting: false,
         restore: None,
         focus,
+        playing_shown: None,
     }));
     with(&app, |a| {
         a.reveal();
@@ -289,6 +292,7 @@ impl App {
 
     /// Timecode, playhead and the composer's time, when the frame changed.
     fn draw(&mut self) {
+        self.sync_transport();
         let f = self.frame();
         if f == self.shown {
             return;
@@ -336,37 +340,45 @@ impl App {
         }
     }
 
-    fn show_play_state(&self) {
+    /// Keep the transport true to the video every frame, not only on its events (WebKit can
+    /// fire `play` while our own handler still holds the app, and that event is then skipped):
+    /// the play button shows what the video is doing, and the browser's controls stay off the
+    /// picture unless the video is full screen.
+    fn sync_transport(&mut self) {
         let playing = !self.els.video.paused();
-        let _ = self.els.play.class_list().toggle_with_force("playing", playing);
-        let _ = self.els.play.set_attribute("aria-label", if playing { "Pause" } else { "Play" });
+        if self.playing_shown != Some(playing) {
+            self.playing_shown = Some(playing);
+            let _ = self.els.play.class_list().toggle_with_force("playing", playing);
+            let _ = self.els.play.set_attribute("aria-label", if playing { "Pause" } else { "Play" });
+        }
+        if self.els.video.controls() && self.els.doc.fullscreen_element().is_none() {
+            self.els.video.set_controls(false);
+        }
     }
 
-    /// Full screen with the browser's own player (the page's transport is not in it): the
-    /// standard API where there is one, else the iPhone's `webkitEnterFullscreen` on the video.
-    /// If the browser refuses, the video goes back to the page's transport.
+    /// Full screen. iPhone (and Safari): the video's own full-screen player, which brings its own
+    /// controls. Elsewhere: the standard call on the video, whose controls `fullscreenchange`
+    /// turns on while it is full screen. The page never turns the controls on by itself, so a
+    /// refused or unanswered request cannot leave them over the picture.
     fn fullscreen(&self) {
         let video = self.els.video.clone();
+        if call_method(&video, "webkitEnterFullscreen").is_some() {
+            return;
+        }
         let status = self.els.status.clone();
-        video.set_controls(true);
-        let refused = move |video: &HtmlVideoElement| {
-            video.set_controls(false);
+        let refused = move || {
             status.set_text_content(Some("This browser can't play full screen here."));
             let _ = status.class_list().add_1("err");
         };
         match call_method(&video, "requestFullscreen").map(|r| r.dyn_into::<js_sys::Promise>()) {
             // the standard call answers with a promise; a refusal comes later
             Some(Ok(p)) => wasm_bindgen_futures::spawn_local(async move {
-                if JsFuture::from(p).await.is_err() && call_method(&video, "webkitEnterFullscreen").is_none() {
-                    refused(&video);
+                if JsFuture::from(p).await.is_err() {
+                    refused();
                 }
             }),
             Some(Err(_)) => {}
-            None => {
-                if call_method(&video, "webkitEnterFullscreen").is_none() {
-                    refused(&video);
-                }
-            }
+            None => refused(),
         }
     }
 
@@ -523,10 +535,12 @@ fn wire_video(app: &Shared) {
             a.draw();
         });
     });
-    for name in ["play", "pause", "ended"] {
+    // the transport follows the video on its events too (`animate` also checks every frame,
+    // which catches an event skipped while a handler held the app)
+    for name in ["play", "playing", "pause", "ended"] {
         let a2 = app.clone();
         listen(&video, name, move |_: Event| {
-            with(&a2, |a| a.show_play_state());
+            with(&a2, |a| a.sync_transport());
         });
     }
     // tapping the picture plays and pauses (there are no controls over it)
@@ -539,18 +553,14 @@ fn wire_video(app: &Shared) {
             }
         });
     });
-    // back from full screen: the page's transport again
-    let a2 = app.clone();
-    listen(&video, "webkitendfullscreen", move |_: Event| {
-        with(&a2, |a| a.els.video.set_controls(false));
-    });
+    // full screen through the standard API: the browser's controls while it lasts (the page's
+    // transport is not in it); `sync_transport` turns them off again afterwards
     let Some(doc) = with(app, |a| a.els.doc.clone()) else { return };
     let a2 = app.clone();
     listen(&doc, "fullscreenchange", move |_: Event| {
         with(&a2, |a| {
-            if a.els.doc.fullscreen_element().is_none() {
-                a.els.video.set_controls(false);
-            }
+            let on = a.els.doc.fullscreen_element().is_some_and(|e| e.is_same_node(Some(AsRef::<web_sys::Node>::as_ref(&a.els.video))));
+            a.els.video.set_controls(on);
         });
     });
 }
