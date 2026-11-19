@@ -116,7 +116,8 @@ the commands still to run, in order. A typical first run:
 The server renders a page that works with no script: the browser's own player, the comment list,
 and a form with a typed timecode. The scripted page (`apps/filmcraft-review-web`, Rust compiled to
 wasm with `wasm-bindgen` and `web-sys`) adds its own transport under the video (play and pause,
-full screen, the sequence timecode, one-frame steps, the scrub bar with a tick per comment), so
+full screen, the sequence timecode, one-frame steps, ten-second jumps, the scrub bar with a tick per
+comment; keys: Space or K play, J and L jump ten seconds, arrows step frames), so
 nothing covers the picture; tap-to-seek, live comments (server-sent events), the name asked once per
 device, and editing and deleting your own comments. The scripted page fits the visible screen: the
 video stays at the top and only the comment list scrolls; while the on-screen keyboard is up, the
