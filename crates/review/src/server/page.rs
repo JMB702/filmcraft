@@ -1,7 +1,7 @@
 //! The review page, rendered on the server. It works on its own (watch, read, post with a typed
-//! timecode); the wasm module (`filmcraft-review-web`) adds frame stepping, the comment scrub bar,
-//! live comments and the keyboard-following composer. Every piece of reviewer or project text goes
-//! through [`html_escape`].
+//! timecode); the wasm module (`filmcraft-review-web`) adds its own transport, frame stepping, the
+//! comment scrub bar, live comments and a layout that keeps the video and the composer in view.
+//! Every piece of reviewer or project text goes through [`html_escape`].
 
 use crate::model::{Comment, ShareRecord};
 use crate::text::html_escape;
@@ -78,11 +78,15 @@ pub fn render(p: &PageInput) -> String {
                 s.height.max(1)
             ));
             h.push_str("</div>\n");
+            // the scripted page's own transport, under the picture (the browser's controls cover it)
+            h.push_str("<div class=\"scrub js\" id=\"scrub\" hidden>");
+            h.push_str("<button id=\"play\" class=\"ic pp\" type=\"button\" aria-label=\"Play\"></button>");
+            h.push_str("<div class=\"track\" id=\"track\"><div class=\"fill\" id=\"fill\"></div><div class=\"ticks\" id=\"ticks\"></div><div class=\"head\" id=\"head\"></div></div>");
+            h.push_str("<button id=\"fs\" class=\"ic fs\" type=\"button\" aria-label=\"Full screen\"></button></div>\n");
             h.push_str("<div class=\"tools js\" id=\"tools\" hidden>\n");
             h.push_str("<button id=\"back\" class=\"step\" type=\"button\" aria-label=\"Back one frame\"><span aria-hidden=\"true\">‹</span> 1f</button>\n");
             h.push_str("<output id=\"tc\" class=\"tc\" aria-live=\"off\">--:--:--:--</output>\n");
             h.push_str("<button id=\"fwd\" class=\"step\" type=\"button\" aria-label=\"Forward one frame\">1f <span aria-hidden=\"true\">›</span></button>\n</div>\n");
-            h.push_str("<div class=\"scrub js\" id=\"scrub\" hidden><div class=\"track\" id=\"track\"><div class=\"fill\" id=\"fill\"></div><div class=\"ticks\" id=\"ticks\"></div><div class=\"head\" id=\"head\"></div></div></div>\n");
         }
         None => h.push_str("<div class=\"wait\" role=\"status\"><div class=\"spinner\" aria-hidden=\"true\"></div><p>Rendering the video…</p><p class=\"sub\">This page refreshes by itself.</p></div>\n"),
     }

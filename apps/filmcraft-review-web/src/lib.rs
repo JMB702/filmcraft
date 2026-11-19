@@ -8,7 +8,9 @@
 //! - the name asked once and remembered on the device, and a device secret so a reviewer can edit
 //!   or delete their own comments;
 //! - the small or 1080p file by screen and connection, switchable;
-//! - the composer kept above the on-screen keyboard.
+//! - play, pause and full screen under the video, so nothing covers the picture;
+//! - a page that fits the visible screen: the video stays at the top, only the comments scroll,
+//!   and the composer sits right above the on-screen keyboard.
 //!
 //! [`logic`] holds the decisions and builds everywhere (its tests run natively); the DOM glue
 //! (`dom`) is wasm32-only. Build with `cargo xtask review-web`.

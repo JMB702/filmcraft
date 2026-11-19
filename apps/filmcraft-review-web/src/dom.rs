@@ -22,6 +22,7 @@ type Shared = Rc<RefCell<App>>;
 struct Els {
     doc: Document,
     video: HtmlVideoElement,
+    play: HtmlElement,
     tc: Element,
     at: HtmlElement,
     track: HtmlElement,
@@ -74,6 +75,12 @@ pub fn start() {
 
 fn by_id<T: JsCast>(doc: &Document, id: &str) -> Result<T, String> {
     doc.get_element_by_id(id).ok_or_else(|| format!("#{id} is missing"))?.dyn_into::<T>().map_err(|_| format!("#{id} has the wrong type"))
+}
+
+/// Call `obj.name()` if the browser has it; `None` when it is missing or throws.
+fn call_method(obj: &JsValue, name: &str) -> Option<JsValue> {
+    let f = js_sys::Reflect::get(obj, &JsValue::from_str(name)).ok()?.dyn_into::<js_sys::Function>().ok()?;
+    f.call0(obj).ok()
 }
 
 fn js_err(e: JsValue) -> String {
@@ -165,6 +172,7 @@ async fn run() -> Result<(), String> {
     let timing = Timing::of(&info).ok_or("the share has no usable frame rate")?;
     let els = Els {
         video: by_id(&doc, "video")?,
+        play: by_id(&doc, "play")?,
         tc: by_id(&doc, "tc")?,
         at: by_id(&doc, "at")?,
         track: by_id(&doc, "track")?,
@@ -222,7 +230,7 @@ async fn run() -> Result<(), String> {
     wire_scrub(&app);
     wire_list(&app);
     wire_composer(&app);
-    wire_keyboard(&app, &win);
+    wire_viewport(&app, &win);
     wire_live(&app, &base);
     animate(app);
     Ok(())
@@ -242,6 +250,8 @@ impl App {
                 }
             }
         }
+        // our transport sits under the picture; the browser's controls would cover it
+        self.els.video.set_controls(false);
         // the script checks these; the browser's own check would block a hidden field
         let _ = self.els.name.remove_attribute("required");
         let _ = self.els.text.remove_attribute("required");
@@ -290,6 +300,74 @@ impl App {
         let p = format!("{:.3}%", self.timing.percent(f));
         let _ = self.els.fill.style().set_property("width", &p);
         let _ = self.els.head.style().set_property("left", &p);
+    }
+
+    /// Size the page to the visible screen (`--vvh`, `--vvtop` and the `kb` class; see
+    /// review.css), so the video stays in view and the composer sits right above the keyboard.
+    fn fit_viewport(&self) {
+        let Some(root) = self.els.doc.document_element().and_then(|r| r.dyn_into::<HtmlElement>().ok()) else { return };
+        let inner = self.win.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let typing = self.els.doc.active_element().is_some_and(|e| matches!(e.tag_name().as_str(), "INPUT" | "TEXTAREA"));
+        let shell = self.win.visual_viewport().and_then(|v| logic::shell(inner, v.height(), v.offset_top(), v.scale(), typing));
+        let style = root.style();
+        match shell {
+            Some(b) => {
+                let _ = style.set_property("--vvh", &format!("{}px", b.height));
+                let _ = style.set_property("--vvtop", &format!("{}px", b.top));
+                // iOS can leave the page scrolled after the keyboard closes
+                if !b.keyboard && self.win.scroll_y().is_ok_and(|y| y > 0.0) {
+                    self.win.scroll_to_with_x_and_y(0.0, 0.0);
+                }
+            }
+            None => {
+                let _ = style.remove_property("--vvh");
+                let _ = style.remove_property("--vvtop");
+            }
+        }
+        let _ = root.class_list().toggle_with_force("kb", shell.is_some_and(|b| b.keyboard));
+    }
+
+    fn toggle_play(&self) {
+        let v = &self.els.video;
+        if v.paused() || v.ended() {
+            let _ = v.play();
+        } else {
+            let _ = v.pause();
+        }
+    }
+
+    fn show_play_state(&self) {
+        let playing = !self.els.video.paused();
+        let _ = self.els.play.class_list().toggle_with_force("playing", playing);
+        let _ = self.els.play.set_attribute("aria-label", if playing { "Pause" } else { "Play" });
+    }
+
+    /// Full screen with the browser's own player (the page's transport is not in it): the
+    /// standard API where there is one, else the iPhone's `webkitEnterFullscreen` on the video.
+    /// If the browser refuses, the video goes back to the page's transport.
+    fn fullscreen(&self) {
+        let video = self.els.video.clone();
+        let status = self.els.status.clone();
+        video.set_controls(true);
+        let refused = move |video: &HtmlVideoElement| {
+            video.set_controls(false);
+            status.set_text_content(Some("This browser can't play full screen here."));
+            let _ = status.class_list().add_1("err");
+        };
+        match call_method(&video, "requestFullscreen").map(|r| r.dyn_into::<js_sys::Promise>()) {
+            // the standard call answers with a promise; a refusal comes later
+            Some(Ok(p)) => wasm_bindgen_futures::spawn_local(async move {
+                if JsFuture::from(p).await.is_err() && call_method(&video, "webkitEnterFullscreen").is_none() {
+                    refused(&video);
+                }
+            }),
+            Some(Err(_)) => {}
+            None => {
+                if call_method(&video, "webkitEnterFullscreen").is_none() {
+                    refused(&video);
+                }
+            }
+        }
     }
 
     fn set_status(&self, msg: &str, error: bool) {
@@ -445,9 +523,50 @@ fn wire_video(app: &Shared) {
             a.draw();
         });
     });
+    for name in ["play", "pause", "ended"] {
+        let a2 = app.clone();
+        listen(&video, name, move |_: Event| {
+            with(&a2, |a| a.show_play_state());
+        });
+    }
+    // tapping the picture plays and pauses (there are no controls over it)
+    let a2 = app.clone();
+    listen(&video, "click", move |_: Event| {
+        with(&a2, |a| {
+            // in full screen the browser's own controls handle the click
+            if !a.els.video.controls() {
+                a.toggle_play();
+            }
+        });
+    });
+    // back from full screen: the page's transport again
+    let a2 = app.clone();
+    listen(&video, "webkitendfullscreen", move |_: Event| {
+        with(&a2, |a| a.els.video.set_controls(false));
+    });
+    let Some(doc) = with(app, |a| a.els.doc.clone()) else { return };
+    let a2 = app.clone();
+    listen(&doc, "fullscreenchange", move |_: Event| {
+        with(&a2, |a| {
+            if a.els.doc.fullscreen_element().is_none() {
+                a.els.video.set_controls(false);
+            }
+        });
+    });
 }
 
 fn wire_steps(app: &Shared) {
+    let Some(play) = with(app, |a| a.els.play.clone()) else { return };
+    let a2 = app.clone();
+    listen(&play, "click", move |_: Event| {
+        with(&a2, |a| a.toggle_play());
+    });
+    if let Some(Ok(fs)) = with(app, |a| by_id::<HtmlElement>(&a.els.doc, "fs")) {
+        let a2 = app.clone();
+        listen(&fs, "click", move |_: Event| {
+            with(&a2, |a| a.fullscreen());
+        });
+    }
     for (id, delta) in [("back", -1i64), ("fwd", 1)] {
         let Some(Ok(b)) = with(app, |a| by_id::<HtmlElement>(&a.els.doc, id)) else { continue };
         let a2 = app.clone();
@@ -479,19 +598,25 @@ fn wire_steps(app: &Shared) {
             }
         });
     });
-    // arrow keys step frames when not typing (Shift: ten frames)
+    // arrow keys step frames when not typing (Shift: ten frames); Space and K play and pause
     let Some(doc) = with(app, |a| a.els.doc.clone()) else { return };
     let a2 = app.clone();
     listen(&doc, "keydown", move |e: KeyboardEvent| {
-        let typing = e.target().and_then(|t| t.dyn_into::<Element>().ok()).is_some_and(|t| matches!(t.tag_name().as_str(), "INPUT" | "TEXTAREA"));
+        let tag = e.target().and_then(|t| t.dyn_into::<Element>().ok()).map(|t| t.tag_name()).unwrap_or_default();
+        if matches!(tag.as_str(), "INPUT" | "TEXTAREA") {
+            return;
+        }
         let delta = match e.key().as_str() {
             "ArrowLeft" => -1,
             "ArrowRight" => 1,
+            // Space on a focused button presses that button instead
+            " " | "k" | "K" if tag != "BUTTON" && !e.ctrl_key() && !e.meta_key() => {
+                e.prevent_default();
+                with(&a2, |a| a.toggle_play());
+                return;
+            }
             _ => return,
         };
-        if typing {
-            return;
-        }
         e.prevent_default();
         let n = if e.shift_key() { 10 } else { 1 };
         with(&a2, |a| {
@@ -687,6 +812,8 @@ fn post_comment(app: &Shared) {
                     a.highlight(&id);
                     a.els.text.set_value("");
                     a.grow_text();
+                    // close the keyboard so the reviewer is back to watching
+                    let _ = a.els.text.blur();
                     a.set_status(&msg, false);
                 }
                 _ => a.set_status(&logic::error_text(status, &text), true),
@@ -695,23 +822,18 @@ fn post_comment(app: &Shared) {
     });
 }
 
-/// Keep the composer above the on-screen keyboard (`--kb`, see review.css).
-fn wire_keyboard(app: &Shared, win: &Window) {
+/// Keep the page sized to the visible screen as it changes: the keyboard, rotation, toolbars.
+fn wire_viewport(app: &Shared, win: &Window) {
     let Some(vv) = win.visual_viewport() else { return };
-    let update = {
-        let app = app.clone();
-        move |_: Event| {
-            with(&app, |a| {
-                let inner = a.win.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let kb = a.win.visual_viewport().map_or(0.0, |v| logic::keyboard_offset(inner, v.height(), v.offset_top()));
-                if let Some(root) = a.els.doc.document_element().and_then(|r| r.dyn_into::<HtmlElement>().ok()) {
-                    let _ = root.style().set_property("--kb", &format!("{kb}px"));
-                }
-            });
-        }
-    };
-    listen(&vv, "resize", update.clone());
-    listen(&vv, "scroll", update);
+    let Some(doc) = with(app, |a| a.els.doc.clone()) else { return };
+    let targets: [(&EventTarget, &str); 4] = [(&vv, "resize"), (&vv, "scroll"), (&doc, "focusin"), (&doc, "focusout")];
+    for (target, name) in targets {
+        let a2 = app.clone();
+        listen(target, name, move |_: Event| {
+            with(&a2, |a| a.fit_viewport());
+        });
+    }
+    with(app, |a| a.fit_viewport());
 }
 
 /// Other reviewers' comments as they are posted.
