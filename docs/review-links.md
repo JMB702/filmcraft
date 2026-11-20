@@ -120,12 +120,16 @@ full screen, the sequence timecode, one-frame steps, ten-second jumps, the scrub
 comment; keys: Space or K play, J and L jump ten seconds, arrows step frames), so
 nothing covers the picture; tap-to-seek, live comments (server-sent events), the name asked once per
 device, and editing and deleting your own comments. The scripted page fits the visible screen: the
-video stays at the top and only the comment list scrolls; while the on-screen keyboard is up, the
-header and transport step aside and the composer sits right above the keyboard. Wide screens and
+video stays at the top and only the comment list scrolls. Typing on a touch screen switches the
+page to normal flow, as tall as the screen was before the keyboard, ending with the picture, a
+small timecode and the comment bar; iOS scrolls the focused field onto the keyboard itself. (iOS 26
+reports wrong viewport sizes while the keyboard is up, so a layout sized from them floats above the
+keyboard or jumps.) The comment time shows under the picture, not beside the text box. Opening the
+link with `?debug` shows the viewport numbers, for diagnosing a phone. Wide screens and
 phones on their side put the comments beside the video. That choice comes from the page's size
 before the keyboard came up: on iOS the keyboard can shrink the page itself, and a portrait phone
 would otherwise read as one on its side. Edit opens your comment in place: the whole text in a
-box that grows with it, the cursor at the end, Save and Cancel under it (Enter saves, Shift+Enter
+box that grows with it, the cursor at the end, Cancel and Save above it (Enter saves, Shift+Enter
 adds a line, Escape cancels). While it is open the composer steps aside so the box fits above the
 keyboard, and comments arriving meanwhile wait until it closes.
 
