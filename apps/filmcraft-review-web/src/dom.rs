@@ -66,6 +66,10 @@ struct App {
     playing_shown: Option<bool>,
     /// The page size before the keyboard came up (see `logic::Rest`).
     rest: Cell<Option<logic::Rest>>,
+    /// The comment being edited in place. While it is open the list is not rebuilt (that would
+    /// drop the text box and close the keyboard); `stale` marks a rebuild owed when it closes.
+    editing: Option<String>,
+    stale: bool,
 }
 
 #[wasm_bindgen(start)]
@@ -223,6 +227,8 @@ async fn run() -> Result<(), String> {
         focus,
         playing_shown: None,
         rest: Cell::new(None),
+        editing: None,
+        stale: false,
     }));
     with(&app, |a| {
         a.reveal();
@@ -344,7 +350,20 @@ impl App {
             }
         }
         let classes = root.class_list();
-        let _ = classes.toggle_with_force("kb", shell.is_some_and(|b| b.keyboard));
+        let keyboard = shell.is_some_and(|b| b.keyboard);
+        let was = classes.contains("kb");
+        let _ = classes.toggle_with_force("kb", keyboard);
+        // the keyboard just came up over a comment being edited: keep its box in view
+        if keyboard
+            && !was
+            && let Some(active) = self.els.doc.active_element()
+            && active.closest(".feed").ok().flatten().is_some()
+        {
+            let target = active.closest(".edit-box").ok().flatten().unwrap_or(active);
+            let o = ScrollIntoViewOptions::new();
+            o.set_block(ScrollLogicalPosition::Nearest);
+            target.scroll_into_view_with_scroll_into_view_options(&o);
+        }
         let _ = classes.toggle_with_force("side", rest.is_some_and(logic::Rest::side_by_side));
         let _ = classes.toggle_with_force("low", rest.is_some_and(logic::Rest::low));
     }
@@ -406,7 +425,13 @@ impl App {
     }
 
     /// The comment list, the count and the scrub ticks, from `self.comments`.
-    fn render_comments(&self) {
+    fn render_comments(&mut self) {
+        if self.editing.is_some() {
+            self.stale = true;
+            self.els.count.set_text_content(Some(&logic::count_label(self.comments.len())));
+            return;
+        }
+        self.stale = false;
         let doc = &self.els.doc;
         self.els.list.set_text_content(None);
         self.els.ticks.set_text_content(None);
@@ -475,6 +500,67 @@ impl App {
         }
     }
 
+    /// Open a comment for editing in place: its text becomes a box with the whole comment, the
+    /// cursor at the end, and Save and Cancel under it.
+    fn start_edit(&mut self, id: &str) {
+        if self.editing.as_deref() == Some(id) {
+            return;
+        }
+        self.close_edit();
+        let Some(old) = self.comments.iter().find(|c| c.id == id).map(|c| c.text.clone()) else { return };
+        let doc = &self.els.doc;
+        let Some(li) = doc.get_element_by_id(&format!("c-{id}")) else { return };
+        let Ok(edit) = edit_box(doc, &old) else { return };
+        for sel in [".txt", ".c-a", ".sub"] {
+            if let Ok(Some(e)) = li.query_selector(sel)
+                && let Ok(e) = e.dyn_into::<HtmlElement>()
+            {
+                e.set_hidden(true);
+            }
+        }
+        if li.append_child(&edit).is_err() {
+            return;
+        }
+        self.editing = Some(id.to_string());
+        self.mark_editing(true);
+        if let Ok(Some(t)) = edit.query_selector("textarea")
+            && let Ok(t) = t.dyn_into::<HtmlTextAreaElement>()
+        {
+            grow(&t);
+            let _ = t.focus();
+            let end = t.value().encode_utf16().count() as u32;
+            let _ = t.set_selection_range(end, end);
+            let o = ScrollIntoViewOptions::new();
+            o.set_block(ScrollLogicalPosition::Nearest);
+            edit.scroll_into_view_with_scroll_into_view_options(&o);
+        }
+    }
+
+    /// While a comment is open for editing the composer steps aside: the list gets its room, so
+    /// the editor and its buttons fit above the keyboard.
+    fn mark_editing(&self, on: bool) {
+        if let Some(root) = self.els.doc.document_element() {
+            let _ = root.class_list().toggle_with_force("editing", on);
+        }
+    }
+
+    /// Close the editor without saving and redraw the list (with anything that arrived meanwhile).
+    fn close_edit(&mut self) {
+        if self.editing.take().is_some() {
+            self.mark_editing(false);
+            self.render_comments();
+            self.fit_viewport();
+        }
+    }
+
+    /// The text in the open editor.
+    fn edit_text(&self) -> Option<String> {
+        let id = self.editing.as_ref()?;
+        let li = self.els.doc.get_element_by_id(&format!("c-{id}"))?;
+        let t = li.query_selector("textarea.edit-in").ok().flatten()?.dyn_into::<HtmlTextAreaElement>().ok()?;
+        Some(t.value())
+    }
+
     fn grow_text(&self) {
         let s = self.els.text.style();
         let _ = s.set_property("height", "auto");
@@ -524,6 +610,38 @@ fn comment_item(doc: &Document, t: &Timing, c: &Comment, mine: bool) -> Result<E
         li.append_child(&a)?;
     }
     Ok(li)
+}
+
+/// The in-place editor: a box with the comment's whole text, then Cancel and Save.
+fn edit_box(doc: &Document, text: &str) -> Result<Element, JsValue> {
+    let d = doc.create_element("div")?;
+    d.set_class_name("edit-box");
+    let t = doc.create_element("textarea")?.dyn_into::<HtmlTextAreaElement>()?;
+    t.set_class_name("in txtin edit-in");
+    t.set_attribute("maxlength", "2000")?;
+    t.set_attribute("enterkeyhint", "done")?;
+    t.set_attribute("aria-label", "Edit your comment")?;
+    t.set_value(text);
+    d.append_child(&t)?;
+    let a = doc.create_element("div")?;
+    a.set_class_name("c-a");
+    for (act, label, class) in [("cancel", "Cancel", "cancel"), ("save", "Save", "save")] {
+        let b = doc.create_element("button")?;
+        b.set_class_name(class);
+        b.set_attribute("type", "button")?;
+        b.set_attribute("data-act", act)?;
+        b.set_text_content(Some(label));
+        a.append_child(&b)?;
+    }
+    d.append_child(&a)?;
+    Ok(d)
+}
+
+/// Size a text box to its text (the stylesheet caps it).
+fn grow(t: &HtmlTextAreaElement) {
+    let s = t.style();
+    let _ = s.set_property("height", "auto");
+    let _ = s.set_property("height", &format!("{}px", t.scroll_height().max(44)));
 }
 
 fn wire_video(app: &Shared) {
@@ -706,10 +824,20 @@ fn wire_list(app: &Shared) {
     listen(&list, "click", move |e: Event| {
         let Some(t) = e.target().and_then(|t| t.dyn_into::<Element>().ok()) else { return };
         let Some(li) = t.closest("li.c").ok().flatten() else { return };
+        // taps in the editor place the cursor; they don't seek
+        if t.closest(".edit-in").ok().flatten().is_some() {
+            return;
+        }
         let id = li.id().strip_prefix("c-").unwrap_or_default().to_string();
         let act = t.closest("[data-act]").ok().flatten().and_then(|b| b.get_attribute("data-act"));
         e.prevent_default();
         match act.as_deref() {
+            Some("edit") => {
+                with(&a2, |a| a.start_edit(&id));
+            }
+            Some("cancel") => {
+                with(&a2, |a| a.close_edit());
+            }
             Some(act) => change_comment(&a2, id, act.to_string()),
             None => {
                 let frame = li.get_attribute("data-frame").and_then(|f| f.parse::<i64>().ok()).unwrap_or(0);
@@ -720,20 +848,46 @@ fn wire_list(app: &Shared) {
             }
         }
     });
+    // the editor grows with its text; Enter saves (Shift+Enter: new line), Escape cancels
+    listen(&list, "input", move |e: Event| {
+        if let Some(t) = e.target().and_then(|t| t.dyn_into::<HtmlTextAreaElement>().ok()) {
+            grow(&t);
+        }
+    });
+    let a2 = app.clone();
+    listen(&list, "keydown", move |e: KeyboardEvent| {
+        let Some(t) = e.target().and_then(|t| t.dyn_into::<Element>().ok()) else { return };
+        if !t.class_list().contains("edit-in") || e.is_composing() {
+            return;
+        }
+        let Some(id) = t.closest("li.c").ok().flatten().map(|li| li.id().strip_prefix("c-").unwrap_or_default().to_string()) else { return };
+        if e.key() == "Enter" && !e.shift_key() {
+            e.prevent_default();
+            change_comment(&a2, id, "save".into());
+        } else if e.key() == "Escape" {
+            e.prevent_default();
+            with(&a2, |a| a.close_edit());
+        }
+    });
 }
 
 /// Edit or delete one of this device's comments.
 fn change_comment(app: &Shared, id: String, act: String) {
-    let Some((win, base, device, old)) =
-        with(app, |a| (a.win.clone(), a.base.clone(), a.device.clone(), a.comments.iter().find(|c| c.id == id).map(|c| c.text.clone())))
-    else {
+    let Some((win, base, device, old, typed)) = with(app, |a| {
+        let typed = if a.editing.as_deref() == Some(id.as_str()) { a.edit_text() } else { None };
+        (a.win.clone(), a.base.clone(), a.device.clone(), a.comments.iter().find(|c| c.id == id).map(|c| c.text.clone()), typed)
+    }) else {
         return;
     };
     let Some(old) = old else { return };
-    let body = if act == "edit" {
-        let Ok(Some(new)) = win.prompt_with_message_and_default("Edit your comment", &old) else { return };
-        let Some(new) = logic::clean_comment(&new) else { return };
+    let body = if act == "save" {
+        let Some(typed) = typed else { return };
+        let Some(new) = logic::clean_comment(&typed) else {
+            with(app, |a| a.set_status("A comment can't be empty. Delete it instead, or cancel.", true));
+            return;
+        };
         if new == old {
+            with(app, |a| a.close_edit());
             return;
         }
         serde_json::json!({ "action": "edit", "text": new, "device": device })
@@ -748,7 +902,10 @@ fn change_comment(app: &Shared, id: String, act: String) {
         let (status, text) = fetch(&win, &format!("{base}comments/{id}"), "POST", Some(&body.to_string())).await;
         with(&app, |a| {
             if status == 200 {
-                let kind = if act == "edit" { filmcraft_review::EventKind::Edit } else { filmcraft_review::EventKind::Delete };
+                // a delete or a saved edit closes the editor (a failed save keeps it and its text)
+                a.editing = None;
+                a.mark_editing(false);
+                let kind = if act == "save" { filmcraft_review::EventKind::Edit } else { filmcraft_review::EventKind::Delete };
                 let new = body.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string();
                 let ev = CommentEvent {
                     id: String::new(),
@@ -760,10 +917,10 @@ fn change_comment(app: &Shared, id: String, act: String) {
                     device: String::new(),
                     at_unix: 0,
                 };
-                if logic::apply(&mut a.comments, &ev) {
-                    a.render_comments();
-                }
-                a.set_status(if act == "edit" { "Comment changed." } else { "Comment deleted." }, false);
+                logic::apply(&mut a.comments, &ev);
+                a.render_comments();
+                a.fit_viewport();
+                a.set_status(if act == "save" { "Comment changed." } else { "Comment deleted." }, false);
             } else {
                 a.set_status(&logic::error_text(status, &text), true);
             }
