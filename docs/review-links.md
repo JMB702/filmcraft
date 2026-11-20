@@ -124,7 +124,10 @@ video stays at the top and only the comment list scrolls; while the on-screen ke
 header and transport step aside and the composer sits right above the keyboard. Wide screens and
 phones on their side put the comments beside the video. That choice comes from the page's size
 before the keyboard came up: on iOS the keyboard can shrink the page itself, and a portrait phone
-would otherwise read as one on its side.
+would otherwise read as one on its side. Edit opens your comment in place: the whole text in a
+box that grows with it, the cursor at the end, Save and Cancel under it (Enter saves, Shift+Enter
+adds a line, Escape cancels). While it is open the composer steps aside so the box fits above the
+keyboard, and comments arriving meanwhile wait until it closes.
 
 ```sh
 cargo xtask review-web                                  # → target/review-web

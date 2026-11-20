@@ -112,6 +112,12 @@ button { font: inherit; color: inherit; }
 .c-a { display: flex; gap: 8px; margin-top: 6px; }
 .c-a button { min-height: 44px; padding: 0 12px; border: 0; background: none; color: var(--dim); font-size: 14px; }
 .c-a .del { color: var(--danger); }
+/* Editing a comment in place: the whole text in a box that grows with it, Save beside Cancel. */
+.edit-box { margin-top: 6px; }
+.edit-box .edit-in { display: block; width: 100%; max-height: min(40dvh, 220px); }
+.edit-box .c-a { justify-content: flex-end; }
+.c-a .save { color: var(--accent); font-weight: 600; }
+html.wasm.editing .composer { display: none; }
 .empty { color: var(--dim); text-align: center; padding: 28px 0; margin: 0; }
 
 /* Without the script the composer is fixed to the bottom; with it, it ends the page (below). */
