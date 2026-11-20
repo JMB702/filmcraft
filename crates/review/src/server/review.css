@@ -46,8 +46,8 @@ button { font: inherit; color: inherit; }
 .stage { position: sticky; top: 0; z-index: 5; background: #000; }
 .stage video { display: block; width: 100%; height: auto; max-height: 62dvh; background: #000; }
 @media (orientation: landscape) and (max-height: 500px) {
-  .stage video { max-height: 100dvh; }
-  .top { display: none; }
+  html:not(.wasm) .stage video { max-height: 100dvh; }
+  html:not(.wasm) .top { display: none; }
 }
 
 .tools {
@@ -185,21 +185,23 @@ html.wasm.kb :is(.top, .scrub, .tools) { display: none; }
 html.wasm.kb .stage video { max-height: max(96px, calc(var(--vvh, 100dvh) - 220px)); }
 html.wasm.kb .composer { padding-bottom: 8px; }
 
-/* Wide screens, and phones on their side: the comments beside the picture. */
-@media (min-width: 900px), (orientation: landscape) and (max-height: 500px) {
-  html.wasm body {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) clamp(300px, 40vw, 440px);
-    grid-template-rows: auto minmax(0, 1fr) auto auto;
-    grid-template-areas: "top top" "stage feed" "scrub feed" "tools composer";
-  }
-  html.wasm .top { grid-area: top; border-bottom: 1px solid var(--line); }
-  html.wasm .stage { grid-area: stage; min-height: 0; }
-  html.wasm .stage video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
-  html.wasm .scrub { grid-area: scrub; }
-  html.wasm .tools { grid-area: tools; align-self: center; padding-bottom: calc(4px + env(safe-area-inset-bottom)); }
-  html.wasm .feed { grid-area: feed; border-left: 1px solid var(--line); }
-  html.wasm .composer { grid-area: composer; border-left: 1px solid var(--line); }
-  /* the timecode is right beside it, under the picture; the comment box gets the room */
-  html.wasm .composer .at-chip { display: none; }
+/* Wide screens, and phones on their side: the comments beside the picture. The page's wasm sets
+   .side (and .low for a phone on its side) from the size before the keyboard came up: on iOS the
+   keyboard can shrink the page itself, and a media query would then read a portrait phone as
+   landscape. */
+html.wasm.side body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(300px, 40vw, 440px);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "top top" "stage feed" "scrub feed" "tools composer";
 }
+html.wasm.side .top { grid-area: top; border-bottom: 1px solid var(--line); }
+html.wasm.side .stage { grid-area: stage; min-height: 0; }
+html.wasm.side .stage video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
+html.wasm.side .scrub { grid-area: scrub; }
+html.wasm.side .tools { grid-area: tools; align-self: center; padding-bottom: calc(4px + env(safe-area-inset-bottom)); }
+html.wasm.side .feed { grid-area: feed; border-left: 1px solid var(--line); }
+html.wasm.side .composer { grid-area: composer; border-left: 1px solid var(--line); }
+/* the timecode is right beside it, under the picture; the comment box gets the room */
+html.wasm.side .composer .at-chip { display: none; }
+html.wasm.low .top { display: none; }

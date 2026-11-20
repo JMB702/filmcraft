@@ -2,7 +2,7 @@
 //! `textContent`, never as HTML. Until setup succeeds the page stays the server's no-script page,
 //! so a failure here never leaves a reviewer without a way to comment.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use filmcraft_review::model::{Comment, CommentEvent, Rendition, ShareInfo};
@@ -64,6 +64,8 @@ struct App {
     focus: Option<String>,
     /// The play button's state as last drawn (`None`: draw it).
     playing_shown: Option<bool>,
+    /// The page size before the keyboard came up (see `logic::Rest`).
+    rest: Cell<Option<logic::Rest>>,
 }
 
 #[wasm_bindgen(start)]
@@ -220,6 +222,7 @@ async fn run() -> Result<(), String> {
         restore: None,
         focus,
         playing_shown: None,
+        rest: Cell::new(None),
     }));
     with(&app, |a| {
         a.reveal();
@@ -320,7 +323,11 @@ impl App {
         let Some(root) = self.els.doc.document_element().and_then(|r| r.dyn_into::<HtmlElement>().ok()) else { return };
         let inner = self.win.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
         let typing = self.els.doc.active_element().is_some_and(|e| matches!(e.tag_name().as_str(), "INPUT" | "TEXTAREA"));
-        let shell = self.win.visual_viewport().and_then(|v| logic::shell(inner, v.height(), v.offset_top(), v.scale(), typing));
+        let width = self.win.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let rest = logic::Rest::next(self.rest.get(), width, inner, typing);
+        self.rest.set(rest);
+        let rest_height = rest.map_or(inner, |r| r.height);
+        let shell = self.win.visual_viewport().and_then(|v| logic::shell(inner, rest_height, v.height(), v.offset_top(), v.scale(), typing));
         let style = root.style();
         match shell {
             Some(b) => {
@@ -336,7 +343,10 @@ impl App {
                 let _ = style.remove_property("--vvtop");
             }
         }
-        let _ = root.class_list().toggle_with_force("kb", shell.is_some_and(|b| b.keyboard));
+        let classes = root.class_list();
+        let _ = classes.toggle_with_force("kb", shell.is_some_and(|b| b.keyboard));
+        let _ = classes.toggle_with_force("side", rest.is_some_and(logic::Rest::side_by_side));
+        let _ = classes.toggle_with_force("low", rest.is_some_and(logic::Rest::low));
     }
 
     fn toggle_play(&self) {
