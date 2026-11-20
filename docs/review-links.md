@@ -122,7 +122,9 @@ nothing covers the picture; tap-to-seek, live comments (server-sent events), the
 device, and editing and deleting your own comments. The scripted page fits the visible screen: the
 video stays at the top and only the comment list scrolls; while the on-screen keyboard is up, the
 header and transport step aside and the composer sits right above the keyboard. Wide screens and
-phones on their side put the comments beside the video.
+phones on their side put the comments beside the video. That choice comes from the page's size
+before the keyboard came up: on iOS the keyboard can shrink the page itself, and a portrait phone
+would otherwise read as one on its side.
 
 ```sh
 cargo xtask review-web                                  # → target/review-web

@@ -231,17 +231,54 @@ pub struct Shell {
 /// Keyboard detection: the view has to shrink by more than this while a field has focus.
 const KEYBOARD_MIN: f64 = 120.0;
 
-/// The shell box from `window.innerHeight` and `visualViewport` (height, offsetTop, scale).
-/// `None`: leave the page at its normal size (nothing usable, or the reviewer pinch-zoomed and
-/// needs to pan around).
-pub fn shell(inner_height: f64, vv_height: f64, vv_offset_top: f64, vv_scale: f64, typing: bool) -> Option<Shell> {
+/// The page's size with no keyboard up. On iOS the keyboard can shrink the layout viewport itself
+/// (newer Safari, third-party keyboards), so a portrait phone with the keyboard up looks wider
+/// than tall. Layout and keyboard decisions use this size instead of the live one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rest {
+    /// Width in CSS px.
+    pub width: f64,
+    /// Height in CSS px.
+    pub height: f64,
+}
+
+impl Rest {
+    /// The resting size after a viewport change. While a text field has focus the size measured
+    /// before typing stands; a change of width (the phone turned) takes the new size.
+    pub fn next(prev: Option<Rest>, width: f64, height: f64, typing: bool) -> Option<Rest> {
+        let usable = |v: f64| v.is_finite() && v > 0.0;
+        if !usable(width) || !usable(height) {
+            return prev;
+        }
+        match prev {
+            Some(p) if typing && (p.width - width).abs() < 1.0 => Some(Rest { height: p.height.max(height), ..p }),
+            _ => Some(Rest { width, height }),
+        }
+    }
+
+    /// A phone on its side: the header steps aside and the comments go beside the picture.
+    pub fn low(self) -> bool {
+        self.width > self.height && self.height <= 500.0
+    }
+
+    /// The comments beside the picture: wide screens and phones on their side.
+    pub fn side_by_side(self) -> bool {
+        self.width >= 900.0 || self.low()
+    }
+}
+
+/// The shell box from `window.innerHeight`, the resting height (see [`Rest`]) and
+/// `visualViewport` (height, offsetTop, scale). `None`: leave the page at its normal size
+/// (nothing usable, or the reviewer pinch-zoomed and needs to pan around).
+pub fn shell(inner_height: f64, rest_height: f64, vv_height: f64, vv_offset_top: f64, vv_scale: f64, typing: bool) -> Option<Shell> {
     let usable = |v: f64| v.is_finite() && v > 0.0;
     if !usable(inner_height) || !usable(vv_height) || !vv_offset_top.is_finite() || !usable(vv_scale) || (vv_scale - 1.0).abs() > 0.01 {
         return None;
     }
     let height = vv_height.min(inner_height).round();
     let top = vv_offset_top.max(0.0).round();
-    Some(Shell { height, top, keyboard: typing && inner_height - height > KEYBOARD_MIN })
+    let full = if usable(rest_height) { rest_height.max(inner_height) } else { inner_height };
+    Some(Shell { height, top, keyboard: typing && full - height > KEYBOARD_MIN })
 }
 
 /// The error text of a failed request: the server's `{"error": …}`, else a generic one.
@@ -395,23 +432,52 @@ mod tests {
     #[test]
     fn the_page_fits_the_visible_screen_and_errors_read_well() {
         // keyboard up while typing: the page is the part above it, shifted where iOS scrolled
-        assert_eq!(shell(812.0, 430.4, 0.0, 1.0, true), Some(Shell { height: 430.0, top: 0.0, keyboard: true }));
-        assert_eq!(shell(812.0, 430.0, 96.0, 1.0, true), Some(Shell { height: 430.0, top: 96.0, keyboard: true }));
+        assert_eq!(shell(812.0, 812.0, 430.4, 0.0, 1.0, true), Some(Shell { height: 430.0, top: 0.0, keyboard: true }));
+        assert_eq!(shell(812.0, 812.0, 430.0, 96.0, 1.0, true), Some(Shell { height: 430.0, top: 96.0, keyboard: true }));
         // the same shrink without a focused field (toolbar, split view) is not a keyboard
-        assert_eq!(shell(812.0, 430.0, 0.0, 1.0, false), Some(Shell { height: 430.0, top: 0.0, keyboard: false }));
+        assert_eq!(shell(812.0, 812.0, 430.0, 0.0, 1.0, false), Some(Shell { height: 430.0, top: 0.0, keyboard: false }));
         // a small shrink (Safari's toolbar) is not a keyboard either
-        assert_eq!(shell(812.0, 760.0, 0.0, 1.0, true), Some(Shell { height: 760.0, top: 0.0, keyboard: false }));
-        assert_eq!(shell(812.0, 900.0, -5.0, 1.0, false), Some(Shell { height: 812.0, top: 0.0, keyboard: false }));
+        assert_eq!(shell(812.0, 812.0, 760.0, 0.0, 1.0, true), Some(Shell { height: 760.0, top: 0.0, keyboard: false }));
+        assert_eq!(shell(812.0, 812.0, 900.0, -5.0, 1.0, false), Some(Shell { height: 812.0, top: 0.0, keyboard: false }));
         // pinch zoom: leave the page alone so the reviewer can pan
-        assert_eq!(shell(812.0, 406.0, 100.0, 2.0, false), None);
+        assert_eq!(shell(812.0, 812.0, 406.0, 100.0, 2.0, false), None);
         for bad in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
-            assert_eq!(shell(bad, 400.0, 0.0, 1.0, true), None);
-            assert_eq!(shell(812.0, bad, 0.0, 1.0, true), None);
-            assert_eq!(shell(812.0, 400.0, 0.0, bad, true), None);
+            assert_eq!(shell(bad, 812.0, 400.0, 0.0, 1.0, true), None);
+            assert_eq!(shell(812.0, 812.0, bad, 0.0, 1.0, true), None);
+            assert_eq!(shell(812.0, 812.0, 400.0, 0.0, bad, true), None);
         }
-        assert_eq!(shell(812.0, 400.0, f64::NAN, 1.0, true), None);
+        assert_eq!(shell(812.0, 812.0, 400.0, f64::NAN, 1.0, true), None);
+        // the keyboard shrank the layout viewport too (iOS 26, third-party keyboards): still a keyboard
+        assert_eq!(shell(430.0, 812.0, 430.0, 0.0, 1.0, true), Some(Shell { height: 430.0, top: 0.0, keyboard: true }));
+        // no resting size yet: the live one
+        assert_eq!(shell(430.0, f64::NAN, 430.0, 0.0, 1.0, true), Some(Shell { height: 430.0, top: 0.0, keyboard: false }));
         assert_eq!(error_text(429, r#"{"error":"Too many comments at once."}"#), "Too many comments at once.");
         assert_eq!(error_text(500, "<html>"), "The comment was not posted (error 500).");
         assert!(error_text(0, "").starts_with("No connection"));
+    }
+
+    #[test]
+    fn a_portrait_phone_typing_stays_in_the_portrait_layout() {
+        let phone = Rest::next(None, 430.0, 932.0, false);
+        assert_eq!(phone, Some(Rest { width: 430.0, height: 932.0 }));
+        // the keyboard shrinks the page to 430 x 380: still the portrait phone
+        let typing = Rest::next(phone, 430.0, 380.0, true);
+        assert_eq!(typing, phone);
+        assert!(typing.is_some_and(|r| !r.side_by_side() && !r.low()));
+        // the same live size without a focused field is a real change (a short window)
+        assert_eq!(Rest::next(phone, 430.0, 380.0, false), Some(Rest { width: 430.0, height: 380.0 }));
+        // turned while typing: the new width wins
+        let turned = Rest::next(phone, 932.0, 400.0, true);
+        assert!(turned.is_some_and(|r| r.low() && r.side_by_side()));
+        // wide screens put the comments beside the picture; a tall narrow window does not
+        assert!(Rest { width: 1280.0, height: 800.0 }.side_by_side());
+        assert!(!Rest { width: 1280.0, height: 800.0 }.low());
+        assert!(!Rest { width: 600.0, height: 900.0 }.side_by_side());
+        // unusable sizes keep what we had
+        for bad in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            assert_eq!(Rest::next(phone, bad, 900.0, false), phone);
+            assert_eq!(Rest::next(phone, 430.0, bad, false), phone);
+            assert_eq!(Rest::next(None, bad, bad, false), None);
+        }
     }
 }
