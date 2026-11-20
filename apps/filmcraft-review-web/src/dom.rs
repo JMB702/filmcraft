@@ -70,6 +70,8 @@ struct App {
     /// drop the text box and close the keyboard); `stale` marks a rebuild owed when it closes.
     editing: Option<String>,
     stale: bool,
+    /// `?debug` on the link: a readout of the viewport numbers, for diagnosing a phone's layout.
+    diag: Option<Element>,
 }
 
 #[wasm_bindgen(start)]
@@ -209,6 +211,7 @@ async fn run() -> Result<(), String> {
     let hash = win.location().hash().unwrap_or_default();
     let focus = hash.strip_prefix("#c-").filter(|id| filmcraft_review::text::is_hex(id, filmcraft_review::token::ID_HEX)).map(str::to_string);
     let device = device_secret(&win);
+    let diag = diag_box(&els.doc, &win);
     let app = Rc::new(RefCell::new(App {
         win: win.clone(),
         els,
@@ -229,6 +232,7 @@ async fn run() -> Result<(), String> {
         rest: Cell::new(None),
         editing: None,
         stale: false,
+        diag,
     }));
     with(&app, |a| {
         a.reveal();
@@ -323,8 +327,9 @@ impl App {
         let _ = self.els.head.style().set_property("left", &p);
     }
 
-    /// Size the page to the visible screen (`--vvh`, `--vvtop` and the `kb` class; see
-    /// review.css), so the video stays in view and the composer sits right above the keyboard.
+    /// Size the page to the visible screen (`--vvh`, `--vvtop`, `--resth` and the `typing`,
+    /// `compose`, `side` and `low` classes; see review.css), so the video stays in view and the
+    /// composer sits right on the keyboard.
     fn fit_viewport(&self) {
         let Some(root) = self.els.doc.document_element().and_then(|r| r.dyn_into::<HtmlElement>().ok()) else { return };
         let inner = self.win.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -334,38 +339,80 @@ impl App {
         self.rest.set(rest);
         let rest_height = rest.map_or(inner, |r| r.height);
         let shell = self.win.visual_viewport().and_then(|v| logic::shell(inner, rest_height, v.height(), v.offset_top(), v.scale(), typing));
+        let touch = self.touch_typing();
         let style = root.style();
+        let _ = style.set_property("--resth", &format!("{}px", rest_height.round()));
         match shell {
             Some(b) => {
                 let _ = style.set_property("--vvh", &format!("{}px", b.height));
                 let _ = style.set_property("--vvtop", &format!("{}px", b.top));
-                // iOS can leave the page scrolled after the keyboard closes
-                if !b.keyboard && self.win.scroll_y().is_ok_and(|y| y > 0.0) {
-                    self.win.scroll_to_with_x_and_y(0.0, 0.0);
-                }
             }
             None => {
                 let _ = style.remove_property("--vvh");
                 let _ = style.remove_property("--vvtop");
             }
         }
-        let classes = root.class_list();
-        let keyboard = shell.is_some_and(|b| b.keyboard);
-        let was = classes.contains("kb");
-        let _ = classes.toggle_with_force("kb", keyboard);
-        // the keyboard just came up over a comment being edited: keep its box in view
-        if keyboard
-            && !was
-            && let Some(active) = self.els.doc.active_element()
-            && active.closest(".feed").ok().flatten().is_some()
-        {
-            let target = active.closest(".edit-box").ok().flatten().unwrap_or(active);
-            let o = ScrollIntoViewOptions::new();
-            o.set_block(ScrollLogicalPosition::Nearest);
-            target.scroll_into_view_with_scroll_into_view_options(&o);
+        // iOS can leave the page scrolled after the keyboard closes; while typing on a touch
+        // screen the scroll is iOS putting the field on the keyboard, so it stays
+        if touch.is_none() && self.win.scroll_y().is_ok_and(|y| y > 0.0) {
+            self.win.scroll_to_with_x_and_y(0.0, 0.0);
         }
+        let classes = root.class_list();
+        let _ = classes.toggle_with_force("typing", touch.is_some());
+        let _ = classes.toggle_with_force("compose", touch == Some(true));
         let _ = classes.toggle_with_force("side", rest.is_some_and(logic::Rest::side_by_side));
         let _ = classes.toggle_with_force("low", rest.is_some_and(logic::Rest::low));
+    }
+
+    /// Typing on a touch screen: `Some(true)` in the comment bar, `Some(false)` in a comment's
+    /// editor. The page then leaves the fixed, measured layout for normal flow and iOS itself
+    /// scrolls the field onto the keyboard (iOS 26 reports wrong viewport sizes while the
+    /// keyboard is up, so a layout sized from them floats above it or jumps around).
+    fn touch_typing(&self) -> Option<bool> {
+        if self.win.navigator().max_touch_points() <= 0 {
+            return None;
+        }
+        let a = self.els.doc.active_element()?;
+        if !matches!(a.tag_name().as_str(), "INPUT" | "TEXTAREA") {
+            return None;
+        }
+        if a.closest(".composer").ok().flatten().is_some() {
+            Some(true)
+        } else if a.closest(".edit-box").ok().flatten().is_some() {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Every frame: catch a focus change whose event was missed, and refresh the readout.
+    fn check_layout(&self) {
+        let on = self.els.doc.document_element().is_some_and(|r| r.class_list().contains("typing"));
+        if on != self.touch_typing().is_some() {
+            self.fit_viewport();
+        }
+        let Some(d) = &self.diag else { return };
+        let vv = self.win.visual_viewport();
+        let n = |v: Result<JsValue, JsValue>| v.ok().and_then(|v| v.as_f64()).unwrap_or(-1.0);
+        let composer = self.els.composer.get_bounding_client_rect();
+        let cls = self.els.doc.document_element().map(|r| r.class_name()).unwrap_or_default();
+        let text = format!(
+            "inner {:.0}x{:.0}  scrollY {:.0}\nvv {:.0}x{:.0} top {:.0} scale {:.2}\ncomposer {:.0}-{:.0}  rest {:.0}\n{}",
+            n(self.win.inner_width()),
+            n(self.win.inner_height()),
+            self.win.scroll_y().unwrap_or(-1.0),
+            vv.as_ref().map_or(-1.0, |v| v.width()),
+            vv.as_ref().map_or(-1.0, |v| v.height()),
+            vv.as_ref().map_or(-1.0, |v| v.offset_top()),
+            vv.as_ref().map_or(-1.0, |v| v.scale()),
+            composer.top(),
+            composer.bottom(),
+            self.rest.get().map_or(-1.0, |r| r.height),
+            cls,
+        );
+        if d.text_content().as_deref() != Some(text.as_str()) {
+            d.set_text_content(Some(&text));
+        }
     }
 
     fn toggle_play(&self) {
@@ -622,7 +669,8 @@ fn edit_box(doc: &Document, text: &str) -> Result<Element, JsValue> {
     t.set_attribute("enterkeyhint", "done")?;
     t.set_attribute("aria-label", "Edit your comment")?;
     t.set_value(text);
-    d.append_child(&t)?;
+    // the buttons go above the box: iOS scrolls the box itself onto the keyboard, so anything
+    // under it would sit behind the keyboard
     let a = doc.create_element("div")?;
     a.set_class_name("c-a");
     for (act, label, class) in [("cancel", "Cancel", "cancel"), ("save", "Save", "save")] {
@@ -634,7 +682,20 @@ fn edit_box(doc: &Document, text: &str) -> Result<Element, JsValue> {
         a.append_child(&b)?;
     }
     d.append_child(&a)?;
+    d.append_child(&t)?;
     Ok(d)
+}
+
+/// The `?debug` readout (none without it).
+fn diag_box(doc: &Document, win: &Window) -> Option<Element> {
+    let search = win.location().search().ok()?;
+    if !search.split(['?', '&']).any(|p| p == "debug") {
+        return None;
+    }
+    let d = doc.create_element("pre").ok()?;
+    d.set_class_name("diag");
+    doc.body()?.append_child(&d).ok()?;
+    Some(d)
 }
 
 /// Size a text box to its text (the stylesheet caps it).
@@ -1070,6 +1131,7 @@ fn animate(app: Shared) {
     let tick = Closure::<dyn FnMut()>::new(move || {
         let win = with(&app, |a| {
             a.draw();
+            a.check_layout();
             a.win.clone()
         });
         if let (Some(win), Ok(c)) = (win, again.try_borrow())
