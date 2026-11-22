@@ -268,24 +268,19 @@ fn normalize_mix(s: &mut Session, p: &Value) -> Result<Value> {
 /// tracks — "Mix" — or one track) with `transcript.generate`.
 fn transcribe(s: &mut Session, p: &Value) -> Result<Value> {
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
-    let track = match p.get("track") {
-        None => None,
-        Some(Value::String(t)) if t.eq_ignore_ascii_case("mix") => None,
-        Some(_) => Some(crate::commands::track_p(s, p, "track", "sequence.transcribe")?.ok_or_else(|| bad("sequence.transcribe", "unknown `track`"))?),
-    };
-    let mut items = Vec::new();
-    for t in q.audio_tracks.iter().filter(|t| track.is_none_or(|x| x == t.id)) {
-        for it in t.items.iter().filter(|i| i.enabled) {
-            if !items.contains(&it.item.0) {
-                items.push(it.item.0);
-            }
+    let mut params = json!({});
+    match p.get("track") {
+        None | Some(Value::Null) => params["sequence"] = json!(true),
+        Some(Value::String(t)) if t.eq_ignore_ascii_case("mix") => params["sequence"] = json!(true),
+        Some(_) => {
+            crate::commands::track_p(s, p, "track", "sequence.transcribe")?.ok_or_else(|| bad("sequence.transcribe", "unknown `track`"))?;
+            params["track"] = p["track"].clone();
         }
     }
-    if items.is_empty() {
+    if q.audio_tracks.iter().all(|t| t.items.iter().all(|i| !i.enabled)) {
         return Err(EngineError::Other("there are no audio clips to transcribe".into()));
     }
-    let mut params = json!({"items": items});
-    for k in ["language", "diarize", "maxSpeakers", "model"] {
+    for k in ["language", "diarize", "speakers", "maxSpeakers", "model", "engine", "range", "replace", "wait"] {
         if let Some(v) = p.get(k) {
             params[k] = v.clone();
         }

@@ -119,7 +119,7 @@ pub fn diarize(audio: &[f32], t: &mut Transcript, p: &Params) -> usize {
         return 0;
     }
     let one = |t: &mut Transcript| {
-        t.speakers = vec![Speaker { name: "Speaker 1".into() }];
+        t.speakers = vec![Speaker::new("Speaker 1")];
         for w in &mut t.words {
             w.speaker = Some(0);
         }
@@ -243,7 +243,7 @@ pub fn diarize(audio: &[f32], t: &mut Transcript, p: &Params) -> usize {
             w.speaker = Some(sp);
         }
     }
-    t.speakers = (0..order.len()).map(|i| Speaker { name: format!("Speaker {}", i + 1) }).collect();
+    t.speakers = (0..order.len()).map(|i| Speaker::new(format!("Speaker {}", i + 1))).collect();
     order.len()
 }
 

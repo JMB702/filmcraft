@@ -67,7 +67,7 @@ fn meta(command: &str) -> Option<(&'static str, &'static str, &'static str)> {
         "clip.sceneEditDetection" => (tl!("Scene Edit Detection"), "sceneDetect", tl!("Analyze")),
         "sequence.normalizeMixTrack" => (tl!("Normalize Mix Track"), "normalizeMix", tl!("OK")),
         "sequence.simplify" => (tl!("Simplify Sequence"), "simplify", tl!("Simplify")),
-        "sequence.transcribe" => (tl!("Transcribe Sequence"), "transcribe", tl!("Transcribe")),
+        "transcript.generate" => (tl!("Transcribe"), "transcribe", tl!("Transcribe")),
         "file.saveAsTemplate" => (tl!("Save as Template"), "saveTemplate", tl!("Save")),
         "markers.addFlashCue" => (tl!("Flash Cue Marker"), "flashCue", tl!("OK")),
         "help.systemCompatibilityReport" => (tl!("System Compatibility Report"), "systemReport", tl!("Close")),
@@ -91,7 +91,7 @@ fn dialog_command(id: &str) -> Option<&'static str> {
         "clip.sceneEditDetection" => "clip.sceneEditDetection",
         "sequence.normalizeMixTrack" => "sequence.normalizeMixTrack",
         "sequence.simplify" => "sequence.simplify",
-        "sequence.transcribe" => "sequence.transcribe",
+        "sequence.transcribe" => "transcript.generate",
         "file.saveAsTemplate" => "file.saveAsTemplate",
         "markers.addFlashCue" => "markers.addFlashCue",
         "file.newColorMatte" => "file.newColorMatte",
@@ -381,10 +381,7 @@ fn defaults(app: &mut FilmcraftApp, cmd: &str, id: &str, bin: Option<Option<u64>
                 Value::Null,
             )
         }
-        "sequence.transcribe" => {
-            let tracks: Vec<String> = s.active_sequence().map(|q| (1..=q.audio_tracks.len()).map(|i| format!("A{i}")).collect()).unwrap_or_default();
-            (json!({"language": "auto", "track": "mix", "diarize": true}), json!({"tracks": tracks}))
-        }
+        "transcript.generate" => transcribe_defaults(s, &json!({"scope": "sequence"}))?,
         "file.saveAsTemplate" => (json!({"name": s.project.name}), Value::Null),
         "markers.addFlashCue" => (json!({"name": "", "comment": ""}), Value::Null),
         "file.newColorMatte" => {
@@ -508,6 +505,16 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let mut elems: Elems = Vec::new();
     let mut action: Option<&'static str> = None;
     let mut browse: Option<String> = None;
+    let mut ok_text = ok_text.to_string();
+    if d.command == "transcript.generate" {
+        if transcribe_download_done(app, ctx, &mut d) {
+            action = Some("ok");
+        }
+        let bytes: u64 = transcribe_needs(&d.params, &d.info).iter().map(|(_, b)| b).sum();
+        if bytes > 0 {
+            ok_text = tlf!("Download {size} and Transcribe", size = size_text(bytes));
+        }
+    }
     let info_only = matches!(d.command.as_str(), "file.mediaProperties" | "clip.sourceSettings" | "help.systemCompatibilityReport");
     // the title is translated; the window keeps one id whatever the interface language
     let id = egui::Id::unique(("menu-dialog", pre));
@@ -796,22 +803,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     &[("both", tl!("Video and Audio")), ("video", tl!("Video Only")), ("audio", tl!("Audio Only"))],
                 );
             }
-            "sequence.transcribe" => {
-                let langs = pairs(&["auto", "en", "es", "fr", "de", "it", "pt", "ja", "ko", "zh", "nl", "ru"]);
-                combo(ui, &mut elems, "transcribe.language", tl!("Language:"), &mut p["language"], &langs);
-                let mut tracks: Vec<(String, String)> = vec![("mix".into(), tl!("Mix").into())];
-                tracks.extend(
-                    d.info["tracks"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|t| t.as_str())
-                        .map(|t| (t.to_string(), tlf!("Audio on track {t}", t))),
-                );
-                combo(ui, &mut elems, "transcribe.track", tl!("Audio analysis:"), &mut p["track"], &tracks);
-                check(ui, &mut elems, pre, p, "diarize", tl!("Recognize when different speakers are talking"));
-            }
+            "transcript.generate" => transcribe_body(ui, &mut elems, pre, p, &d.info),
             "file.saveAsTemplate" => text(ui, &mut elems, pre, p, "name", tl!("Template Name:"), 240.0),
             "file.newColorMatte" => {
                 color(ui, &mut elems, pre, p, "color", tl!("Color:"));
@@ -870,8 +862,8 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     action = Some("cancel");
                 }
             }
-            let r = ui.button(ok_text);
-            push(&mut elems, format!("{pre}.ok"), &r, ok_text);
+            let r = ui.button(ok_text.as_str());
+            push(&mut elems, format!("{pre}.ok"), &r, ok_text.as_str());
             if r.clicked() {
                 action = Some(if info_only { "cancel" } else { "ok" });
             }
@@ -899,6 +891,14 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
             app.ui.extras.dialog = None;
             return;
         }
+        Some("ok") if d.command == "transcript.generate" => match transcribe_ok(app, &mut d) {
+            Ok(true) => {
+                app.ui.extras.dialog = None;
+                return;
+            }
+            Ok(false) => {}
+            Err(e) => d.error = e,
+        },
         Some("ok") => match run(app, &d) {
             Ok(Some(info)) => d.info["result"] = json!(info),
             Ok(None) => {
@@ -910,6 +910,252 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
         _ => {}
     }
     app.ui.extras.dialog = Some(d);
+}
+
+/// Open the Transcribe dialog (Text panel, timeline and Project context menus, Sequence ▸
+/// Transcript ▸ Transcribe…). `preset` may name `scope` (`clips` | `items` | `track` |
+/// `sequence`) and `track` (`"A2"`). Automation: `engine.execute transcript.generate` runs the job
+/// directly; this dialog is for people.
+pub fn open_transcribe(app: &mut FilmcraftApp, preset: &Value) -> Result<Value, String> {
+    if let Err(e) = enabled(app, "transcript.generate") {
+        app.ui.status = e.clone();
+        return Err(e);
+    }
+    let (params, info) = transcribe_defaults(&mut app.session, preset)?;
+    app.ui.extras.dialog = Some(ClipDialogDraft { command: "transcript.generate".into(), params, info, error: String::new() });
+    Ok(json!({"dialog": "transcribe"}))
+}
+
+/// The Transcribe dialog's parameters (from Settings ▸ Media Analysis & Transcription) and what it
+/// shows: the models (`transcript.models`), the audio tracks, the selection counts and whether
+/// the sequence has an Out point.
+fn transcribe_defaults(s: &mut filmcraft_engine::Session, preset: &Value) -> Result<(Value, Value), String> {
+    let mut info = s.execute("transcript.models", json!({})).map_err(|e| e.to_string())?;
+    let q = s.active_sequence();
+    let tracks: Vec<String> = q.map(|q| (1..=q.audio_tracks.len()).map(|i| format!("A{i}")).collect()).unwrap_or_default();
+    let in_out = q.is_some_and(|q| q.mark_out.is_some());
+    let has_seq = q.is_some();
+    let clips = if has_seq { s.state.selection.len() } else { 0 };
+    let items = s.state.project_selection.len();
+    let scope = match preset.get("scope").and_then(Value::as_str) {
+        Some(x @ ("clips" | "items" | "track" | "sequence")) => x,
+        _ if clips > 0 => "clips",
+        _ if items > 0 => "items",
+        _ => "sequence",
+    };
+    let track = preset.get("track").and_then(Value::as_str).map(str::to_string).or_else(|| tracks.first().cloned()).unwrap_or_default();
+    let ma = &s.prefs.media_analysis;
+    let model = if ma.speech_engine == "whisper" { &ma.whisper_model } else { &ma.parakeet_model };
+    let language = if ma.language_auto_detect || ma.default_language.is_empty() { "auto" } else { ma.default_language.as_str() };
+    let params = json!({
+        "scope": scope, "track": track, "range": "all", "engine": ma.speech_engine, "model": model, "language": language,
+        "diarize": ma.speaker_labeling != "off", "speakers": "auto", "replace": true,
+    });
+    info["tracks"] = json!(tracks);
+    info["inOut"] = json!(in_out);
+    info["clips"] = json!(clips);
+    info["items"] = json!(items);
+    info["sequence"] = json!(has_seq);
+    // a host's own recogniser (tests, embedders) needs no downloads
+    info["host"] = json!(s.transcriber.is_some());
+    Ok((params, info))
+}
+
+const TRANSCRIBE_LANGUAGES: [&str; 25] =
+    ["en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "uk", "cs", "sv", "da", "fi", "el", "hu", "ro", "bg", "tr", "ja", "ko", "zh", "ar", "hi", "id"];
+
+fn transcribe_body(ui: &mut egui::Ui, elems: &mut Elems, pre: &str, p: &mut Value, info: &Value) {
+    let count = |k: &str| info[k].as_u64().unwrap_or(0);
+    let tracks: Vec<&str> = info["tracks"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let mut scopes: Vec<(&str, String)> = Vec::new();
+    if count("clips") > 0 {
+        scopes.push(("clips", tlf!("Selected clips ({n})", n = count("clips"))));
+    }
+    if count("items") > 0 {
+        scopes.push(("items", tlf!("Selected Project items ({n})", n = count("items"))));
+    }
+    if !tracks.is_empty() {
+        scopes.push(("track", tl!("One audio track").into()));
+    }
+    if info["sequence"] == json!(true) {
+        scopes.push(("sequence", tl!("The whole sequence").into()));
+    }
+    let refs: Vec<(&str, &str)> = scopes.iter().map(|(k, l)| (*k, l.as_str())).collect();
+    radios(ui, elems, pre, p, "scope", tl!("Transcribe:"), &refs);
+    if p["scope"] == "track" {
+        combo(ui, elems, "transcribe.track", tl!("Track:"), &mut p["track"], &pairs(&tracks));
+    }
+    if matches!(p["scope"].as_str(), Some("track" | "sequence")) && info["inOut"] == json!(true) {
+        radios(ui, elems, pre, p, "range", tl!("Range:"), &[("all", tl!("All of it")), ("inOut", tl!("Inside In/Out"))]);
+    }
+    ui.separator();
+    let engines: Vec<(&str, &str)> = [("parakeet", tl!("Parakeet (English, fastest)")), ("whisper", tl!("Whisper (many languages)"))]
+        .into_iter()
+        .filter(|(k, _)| info["engines"][*k] != json!(false))
+        .collect();
+    radios(ui, elems, pre, p, "engine", tl!("Engine:"), &engines);
+    let engine = p["engine"].as_str().unwrap_or("parakeet").to_string();
+    let models: Vec<&Value> =
+        info["models"].as_array().map(|a| a.iter().filter(|m| m["engine"] == engine.as_str() && m["kind"] != "speakers").collect()).unwrap_or_default();
+    // another engine's model was chosen: that engine's default
+    if !models.iter().any(|m| m["id"] == p["model"]) {
+        p["model"] = info[if engine == "whisper" { "whisperModel" } else { "parakeetModel" }].clone();
+    }
+    let options: Vec<(String, String)> = models
+        .iter()
+        .map(|m| {
+            let id = m["id"].as_str().unwrap_or_default().to_string();
+            let missing = m["missingBytes"].as_u64().unwrap_or(0);
+            let name = m["name"].as_str().unwrap_or(&id).to_string();
+            (id, if missing > 0 { tlf!("{name} (download {size})", name, size = size_text(missing)) } else { name })
+        })
+        .collect();
+    combo(ui, elems, "transcribe.model", tl!("Model:"), &mut p["model"], &options);
+    let known: Vec<&str> = models
+        .iter()
+        .find(|m| m["id"] == p["model"])
+        .and_then(|m| m["languages"].as_array())
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut langs = vec![("auto".to_string(), tl!("Detect automatically").to_string())];
+    langs.extend(TRANSCRIBE_LANGUAGES.iter().filter(|l| known.is_empty() || known.contains(l) || engine == "parakeet").map(|l| (l.to_string(), l.to_string())));
+    combo(ui, elems, "transcribe.language", tl!("Language:"), &mut p["language"], &langs);
+    if engine == "parakeet" && !known.is_empty() && p["language"].as_str().is_some_and(|l| l != "auto" && !known.contains(&l)) {
+        ui.label(RichText::new(tl!("This model does not know that language: Whisper transcribes it instead.")).weak());
+    }
+    ui.separator();
+    check(ui, elems, pre, p, "diarize", tl!("Detect speakers"));
+    if p["diarize"] == json!(true) {
+        let mut n: Vec<(String, String)> = vec![("auto".into(), tl!("Auto").into())];
+        n.extend((1..=10).map(|i| (i.to_string(), i.to_string())));
+        combo(ui, elems, "transcribe.speakers", tl!("Number of speakers:"), &mut p["speakers"], &n);
+    }
+    check(ui, elems, pre, p, "replace", tl!("Replace existing transcripts (off: skip media that has one)"));
+    let needs = transcribe_needs(p, info);
+    if info.get("download").is_some_and(Value::is_u64) {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(tl!("Downloading the models (see Progress); transcription starts when they are in."));
+        });
+    } else if !needs.is_empty() {
+        let names: Vec<&str> = needs.iter().map(|(id, _)| id.as_str()).collect();
+        let total: u64 = needs.iter().map(|(_, b)| b).sum();
+        ui.label(
+            RichText::new(tlf!("First use downloads {size} once ({names}) into the models folder.", size = size_text(total), names = names.join(", "))).weak(),
+        );
+    }
+}
+
+fn size_text(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 { format!("{:.1} GB", bytes as f64 / 1e9) } else { format!("{:.0} MB", (bytes as f64 / 1e6).max(1.0)) }
+}
+
+/// The models the dialog's choices still need: `(id, bytes)`.
+fn transcribe_needs(p: &Value, info: &Value) -> Vec<(String, u64)> {
+    if info["host"] == json!(true) {
+        return Vec::new();
+    }
+    let mut ids = vec![p["model"].as_str().unwrap_or_default()];
+    if p["diarize"] == json!(true) {
+        ids.push(info["speakerModel"].as_str().unwrap_or_default());
+    }
+    info["models"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| m["available"] == json!(true) && m["id"].as_str().is_some_and(|id| ids.contains(&id)))
+        .filter_map(|m| {
+            let bytes = m["missingBytes"].as_u64().unwrap_or(0);
+            (bytes > 0).then(|| (m["id"].as_str().unwrap_or_default().to_string(), bytes))
+        })
+        .collect()
+}
+
+/// The dialog's download finished: true when transcription should start now.
+fn transcribe_download_done(app: &mut FilmcraftApp, ctx: &egui::Context, d: &mut ClipDialogDraft) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(id) = d.info.get("download").and_then(Value::as_u64) else { return false };
+    let state = app
+        .session
+        .jobs
+        .iter()
+        .find(|j| j.id == id)
+        .map(|j| (j.progress.finished.load(Ordering::Acquire), j.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()));
+    if let Some((false, _)) = state {
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        return false;
+    }
+    if let Some(m) = d.info.as_object_mut() {
+        m.remove("download");
+    }
+    match state {
+        Some((_, Some(Ok(_)))) => match app.session.execute("transcript.models", json!({})) {
+            Ok(v) => {
+                d.info["models"] = v["models"].clone();
+                transcribe_needs(&d.params, &d.info).is_empty()
+            }
+            Err(e) => {
+                d.error = e.to_string();
+                false
+            }
+        },
+        Some((_, Some(Err(e)))) => {
+            d.error = e;
+            false
+        }
+        _ => {
+            d.error = tl!("The download stopped.").into();
+            false
+        }
+    }
+}
+
+/// Transcribe (OK): download what is missing first, then start the job. True closes the dialog.
+fn transcribe_ok(app: &mut FilmcraftApp, d: &mut ClipDialogDraft) -> Result<bool, String> {
+    if d.info.get("download").is_some_and(Value::is_u64) {
+        return Ok(false);
+    }
+    d.error.clear();
+    let needs = transcribe_needs(&d.params, &d.info);
+    if !needs.is_empty() {
+        let ids: Vec<&str> = needs.iter().map(|(id, _)| id.as_str()).collect();
+        let r = app.session.execute("transcript.downloadModel", json!({"models": ids})).map_err(|e| e.to_string())?;
+        d.info["download"] = r["job"].clone();
+        app.ui.status = tl!("Downloading speech models (see Progress)").into();
+        return Ok(false);
+    }
+    let q = transcribe_params(app, &d.params);
+    let r = app.session.execute("transcript.generate", q).map_err(|e| e.to_string())?;
+    let n = r["items"].as_array().map_or(0, Vec::len);
+    app.ui.status = tlf!("Transcribing {n} media item(s) in the background (see Progress)", n);
+    Ok(true)
+}
+
+/// `transcript.generate` parameters of the dialog's choices.
+fn transcribe_params(app: &FilmcraftApp, p: &Value) -> Value {
+    let s = &app.session;
+    let mut q = json!({"engine": p["engine"], "language": p["language"], "diarize": p["diarize"], "replace": p["replace"]});
+    if let Some(m) = p["model"].as_str().filter(|m| !m.is_empty()) {
+        q["model"] = json!(m);
+    }
+    q["speakers"] = match p["speakers"].as_str().and_then(|x| x.parse::<u64>().ok()) {
+        Some(n) => json!(n),
+        None => json!("auto"),
+    };
+    match p["scope"].as_str().unwrap_or_default() {
+        "clips" => q["clips"] = json!(s.state.selection.iter().map(|c| c.0).collect::<Vec<_>>()),
+        "items" => q["items"] = json!(s.state.project_selection.iter().map(|i| i.0).collect::<Vec<_>>()),
+        "track" => {
+            q["track"] = p["track"].clone();
+            q["range"] = p["range"].clone();
+        }
+        _ => {
+            q["sequence"] = json!(true);
+            q["range"] = p["range"].clone();
+        }
+    }
+    q
 }
 
 /// Run the dialog's command(s). `Ok(Some(text))` keeps the dialog open with a message (Find).
@@ -956,9 +1202,6 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
             let mut q = p.clone();
             if cmd == "markers.addFlashCue" && q["name"].as_str().is_some_and(str::is_empty) {
                 q.as_object_mut().map(|m| m.remove("name"));
-            }
-            if cmd == "sequence.transcribe" && q["language"] == "auto" {
-                q.as_object_mut().map(|m| m.remove("language"));
             }
             s.execute(cmd, q).map_err(|e| e.to_string())?;
             Ok(None)
@@ -1028,6 +1271,33 @@ pub fn search_bin_rows(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn transcribe_downloads_only_what_the_choices_need() {
+        use serde_json::json;
+        let info = json!({"speakerModel": "titanet-large", "models": [
+            {"id": "parakeet-tdt-0.6b-v2", "available": true, "missingBytes": 2_471_920_514u64},
+            {"id": "titanet-large", "available": true, "missingBytes": 101_611_209u64},
+            {"id": "whisper-base", "available": true, "missingBytes": 0},
+            {"id": "whisper-small", "available": false, "missingBytes": 500u64},
+        ]});
+        let p = json!({"model": "parakeet-tdt-0.6b-v2", "diarize": true});
+        let needs = super::transcribe_needs(&p, &info);
+        assert_eq!(needs.iter().map(|n| n.0.as_str()).collect::<Vec<_>>(), ["parakeet-tdt-0.6b-v2", "titanet-large"]);
+        // no speakers: no speaker model; an installed model: nothing
+        assert_eq!(super::transcribe_needs(&json!({"model": "parakeet-tdt-0.6b-v2", "diarize": false}), &info).len(), 1);
+        assert!(super::transcribe_needs(&json!({"model": "whisper-base", "diarize": false}), &info).is_empty());
+        // a model this build can't run is not downloaded (transcription reports why)
+        assert!(super::transcribe_needs(&json!({"model": "whisper-small"}), &info).is_empty());
+        // hostile info: nothing, no panic
+        assert!(super::transcribe_needs(&json!({"model": 5}), &json!({"models": "x"})).is_empty());
+        let mut host = info.clone();
+        host["host"] = json!(true);
+        assert!(super::transcribe_needs(&p, &host).is_empty());
+        assert_eq!(super::size_text(2_573_531_723), "2.6 GB");
+        assert_eq!(super::size_text(101_611_209), "102 MB");
+        assert_eq!(super::size_text(10), "1 MB");
+    }
+
     use super::*;
 
     #[test]

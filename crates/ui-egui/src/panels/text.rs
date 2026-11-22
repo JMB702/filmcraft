@@ -615,7 +615,8 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let highlights = app.transcript_cache.highlights(&app.ui.transcript_search);
     let mut x = bar.min.x + sw + 10.0;
     let range = sel.map(|(a, b)| json!({"from": a.min(b), "to": a.max(b)}));
-    let tools: [(Icon, &str, &str, bool, &str, Value); 4] = [
+    let tools: [(Icon, &str, &str, bool, &str, Value); 5] = [
+        (Icon::Mic, "text.transcript.transcribe", tl!("Transcribe…"), filmcraft_speech_available(app), "transcript.generate", json!({})),
         (Icon::Razor, "text.transcript.extract", tl!("Extract selected text"), sel.is_some(), "transcript.extract", range.clone().unwrap_or_default()),
         (Icon::Trash, "text.transcript.lift", tl!("Lift selected text"), sel.is_some(), "transcript.lift", range.unwrap_or_default()),
         (Icon::Link, "text.transcript.removeFillers", tl!("Remove filler words"), true, "transcript.removeFillers", json!({})),
@@ -641,6 +642,7 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let ph = app.session.playhead();
     let current = filmcraft_edit::transcript::word_at(words, ph);
     let paras = &content.paragraphs;
+    let speakers: Vec<String> = words.iter().filter_map(|w| w.speaker.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let rate = app.session.sequence_rate();
     let clock = app.session.active_sequence().map(|q| q.clock()).unwrap_or_else(|| filmcraft_project::TimeClock::plain(rate, false));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list.shrink(6.0)).id_salt("transcript-list"));
@@ -648,9 +650,25 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.set_width(list.width() - 16.0);
         for (pi, pr) in paras.iter().enumerate() {
             let w0 = &words[pr.start];
-            let head = format!("{}  {}", w0.speaker.as_deref().unwrap_or(tl!("Speaker")), clock.timecode(w0.start));
-            let hr = ui.label(egui::RichText::new(head).size(11.0).color(t.text_dim).strong());
-            app.auto.add(&format!("text.transcript.paragraph.{pi}"), hr.rect, "Paragraph");
+            let speaker = w0.speaker.as_deref();
+            // one colour per speaker name, the same in every clip and session
+            let color = speaker.map(speaker_color).unwrap_or(t.text_dim);
+            let hr = ui
+                .horizontal(|ui| {
+                    let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 4.0, color);
+                    let name =
+                        ui.add(egui::Label::new(egui::RichText::new(speaker.unwrap_or(tl!("Speaker"))).size(11.0).color(color).strong()).sense(Sense::click()));
+                    ui.label(egui::RichText::new(clock.timecode(w0.start)).size(11.0).color(t.text_dim));
+                    name
+                })
+                .inner;
+            app.auto.add(&format!("text.transcript.paragraph.{pi}"), hr.rect, speaker.unwrap_or("Paragraph"));
+            let para = (pr.start, pr.end.saturating_sub(1));
+            // closes only on a click outside: the menu holds the name field
+            egui::Popup::context_menu(&hr)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| speaker_menu(app, ui, pi, speaker, para, &speakers, &mut actions));
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
                 for i in pr.clone() {
@@ -680,6 +698,78 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     });
     run(app, ui, actions);
+}
+
+/// A speaker's colour: a hue from the name, so a voice keeps its colour wherever it speaks.
+pub(crate) fn speaker_color(name: &str) -> Color32 {
+    // FNV-1a: stable across runs and platforms (the std hasher is not)
+    let h = name.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
+    // twelve well-separated hues, then a lighter or darker variant
+    let hue = (h % 12) as f32 / 12.0 + 0.02;
+    let value = if (h / 12) % 2 == 0 { 0.92 } else { 0.78 };
+    egui::ecolor::Hsva::new(hue, 0.55, value, 1.0).into()
+}
+
+/// The right-click menu of a paragraph's speaker: rename it (the project remembers the voice, so
+/// later transcriptions name it), merge it into another speaker, or give this paragraph to
+/// another speaker. Automation ids `text.transcript.paragraph.<n>.rename|renameOk|merge.<name>|assign.<name>`.
+fn speaker_menu(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    pi: usize,
+    speaker: Option<&str>,
+    para: (usize, usize),
+    speakers: &[String],
+    actions: &mut Vec<(String, Value)>,
+) {
+    let pre = format!("text.transcript.paragraph.{pi}");
+    if let Some(name) = speaker {
+        let key = egui::Id::unique(("transcript-speaker-rename", pi));
+        let mut buf = ui.data_mut(|d| d.get_temp::<String>(key)).unwrap_or_else(|| name.to_string());
+        ui.label(tl!("Speaker name:"));
+        let r = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(180.0));
+        app.auto.add(&format!("{pre}.rename"), r.rect, "Speaker name");
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let b = ui.button(tl!("Rename Speaker"));
+        app.auto.add(&format!("{pre}.renameOk"), b.rect, "Rename Speaker");
+        let new = buf.trim().to_string();
+        if (enter || b.clicked()) && !new.is_empty() && new != name {
+            actions.push(("transcript.renameSpeaker".into(), json!({"speaker": name, "name": new})));
+            ui.data_mut(|d| d.remove::<String>(key));
+            ui.close();
+            return;
+        }
+        ui.data_mut(|d| d.insert_temp(key, buf));
+    }
+    let others: Vec<&String> = speakers.iter().filter(|s| Some(s.as_str()) != speaker).collect();
+    if others.is_empty() {
+        return;
+    }
+    ui.separator();
+    if let Some(name) = speaker {
+        let r = ui.menu_button(tl!("Merge Into"), |ui| {
+            for o in &others {
+                let b = ui.button(o.as_str());
+                app.auto.add(&format!("{pre}.merge.{o}"), b.rect, o);
+                if b.clicked() {
+                    actions.push(("transcript.mergeSpeakers".into(), json!({"from": name, "into": o})));
+                    ui.close();
+                }
+            }
+        });
+        app.auto.add(&format!("{pre}.merge"), r.response.rect, "Merge Into");
+    }
+    let r = ui.menu_button(tl!("Give This Paragraph To"), |ui| {
+        for o in &others {
+            let b = ui.button(o.as_str());
+            app.auto.add(&format!("{pre}.assign.{o}"), b.rect, o);
+            if b.clicked() {
+                actions.push(("transcript.assignSpeaker".into(), json!({"from": para.0, "to": para.1, "speaker": o})));
+                ui.close();
+            }
+        }
+    });
+    app.auto.add(&format!("{pre}.assign"), r.response.rect, "Give This Paragraph To");
 }
 
 fn filmcraft_speech_available(app: &FilmcraftApp) -> bool {

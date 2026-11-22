@@ -691,6 +691,9 @@ impl ExportQueue {
 /// that poll an export (the bridge, MCP long exports) can report it like `file.exportMedia` does.
 pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     let mut v = j.to_json();
+    if let Some(r) = crate::transcription::report_of(s, j.id) {
+        v["result"] = r.clone();
+    }
     if s.export_offline.contains_key(&j.id) {
         v["offlineMedia"] = offline_media_json(s, j.id);
     }

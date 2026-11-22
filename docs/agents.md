@@ -121,6 +121,10 @@ driven one app can drive the others.
 
 ### Long exports: progress and cancellation
 
+`transcript.generate` and `transcript.downloadModel` with `wait: true` run the same way (a job
+with progress and cancellation over MCP and the bridge); without `wait` they return a job id to
+poll with `transcript.jobs` ([transcripts.md](transcripts.md)).
+
 `command_run {"id": "file.exportMedia", "params": {…, "wait": true}}` in headless mode blocks until
 the file is written. It uses the MCP progress and cancellation utilities, so a client can show
 progress and stop it:

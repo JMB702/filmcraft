@@ -272,7 +272,12 @@ pub struct MediaAnalysisPrefs {
     pub language_auto_detect: bool,
     /// "Default language" (ISO 639-1).
     pub default_language: String,
-    /// Speech model (`transcript.models`).
+    /// Speech engine: `parakeet` (default) | `whisper`. Languages Parakeet does not transcribe,
+    /// and Parakeet failures, go to Whisper.
+    pub speech_engine: String,
+    /// The Parakeet model (`transcript.models`).
+    pub parakeet_model: String,
+    /// The Whisper model (`transcript.models`): the second engine and the fallback.
     pub whisper_model: String,
 }
 
@@ -286,7 +291,9 @@ impl Default for MediaAnalysisPrefs {
             speaker_labeling: "on".into(),
             language_auto_detect: false,
             default_language: "en".into(),
-            whisper_model: filmcraft_speech::models::DEFAULT_MODEL.into(),
+            speech_engine: "parakeet".into(),
+            parakeet_model: filmcraft_speech::models::DEFAULT_MODEL.into(),
+            whisper_model: filmcraft_speech::models::DEFAULT_WHISPER.into(),
         }
     }
 }

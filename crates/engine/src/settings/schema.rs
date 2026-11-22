@@ -191,6 +191,11 @@ const TRANSCRIBE_SCOPE: &[(&str, &str)] =
 const MODELS: &[(&str, &str)] =
     &[("whisper-tiny", "Whisper tiny (fastest)"), ("whisper-base", "Whisper base (balanced)"), ("whisper-small", "Whisper small (most accurate)")];
 
+const ENGINES: &[(&str, &str)] = &[("parakeet", "Parakeet (NVIDIA; fast, most accurate)"), ("whisper", "Whisper (OpenAI; 99 languages)")];
+
+const PARAKEET_MODELS: &[(&str, &str)] =
+    &[("parakeet-tdt-0.6b-v2", "Parakeet TDT 0.6B v2 (English)"), ("parakeet-tdt-0.6b-v3", "Parakeet TDT 0.6B v3 (25 European languages)")];
+
 const AUTO_SCROLL: &[(&str, &str)] = &[("noScroll", "No Scroll"), ("pageScroll", "Page Scroll"), ("smoothScroll", "Smooth Scroll")];
 
 const MOUSE_SCROLL: &[(&str, &str)] = &[("vertical", "Vertical"), ("horizontal", "Horizontal")];
@@ -482,7 +487,9 @@ pub(super) static CATEGORIES: &[Category] = &[
                     f("mediaAnalysis.speakerLabeling", "Speaker Labeling", Kind::Choice(SPEAKERS), true),
                     b("mediaAnalysis.languageAutoDetect", "Enable language auto-detection", true),
                     f("mediaAnalysis.defaultLanguage", "Default language", Kind::Choice(LANGUAGES), true),
-                    f("mediaAnalysis.whisperModel", "Speech model", Kind::Choice(MODELS), true),
+                    f("mediaAnalysis.speechEngine", "Speech engine", Kind::Choice(ENGINES), true),
+                    f("mediaAnalysis.parakeetModel", "Parakeet model", Kind::Choice(PARAKEET_MODELS), true),
+                    f("mediaAnalysis.whisperModel", "Whisper model (other languages)", Kind::Choice(MODELS), true),
                 ],
             ),
         ],

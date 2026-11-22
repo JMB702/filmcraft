@@ -45,7 +45,7 @@ pub use mask::{Mask, MaskMode, MaskPath, MaskVertex, TrackMethod};
 pub use mixer::{AutomationMode, InputMap, MixerStrip, TrackSend};
 pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSource};
 pub use narration::{Narration, VocalPitch};
-pub use transcript::{Speaker, Transcript, Word};
+pub use transcript::{Speaker, Transcript, Voice, Word};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -106,6 +106,9 @@ pub struct Project {
     /// are media time. Shared (`Arc`) so undo snapshots don't copy them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub transcripts: BTreeMap<ItemId, std::sync::Arc<Transcript>>,
+    /// Named voices (speaker voiceprints) that later transcriptions recognise. Schema v18.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voices: Vec<Voice>,
     /// Search bins (File ▸ New ▸ Search Bin): saved Find queries listed in the Project panel.
     /// Schema v11.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -147,6 +150,7 @@ impl Project {
             next_id: 1,
             luts: Vec::new(),
             transcripts: BTreeMap::new(),
+            voices: Vec::new(),
             search_bins: Vec::new(),
             source_graphics: BTreeMap::new(),
             narrations: BTreeMap::new(),

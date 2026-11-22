@@ -63,6 +63,7 @@ pub mod shortcuts;
 pub mod source_monitor;
 pub mod sync;
 pub mod transcript;
+pub mod transcription;
 pub mod trim;
 pub mod voiceover;
 
@@ -621,9 +622,20 @@ pub struct Session {
     pub export_queue: export_tools::ExportQueue,
     /// Exports run a batch at a time by [`Session::pump_jobs`] (hosts without threads: web).
     pub stepped: Vec<SteppedJob>,
-    /// Speech recogniser for `transcript.generate` (None = the Whisper model named by the command,
-    /// feature `whisper`). Hosts and tests install one here.
+    /// Speech recogniser for `transcript.generate` (None = the Parakeet or Whisper model the
+    /// command and settings name, features `parakeet` / `whisper`). Hosts and tests install one here.
     pub transcriber: Option<Arc<dyn filmcraft_speech::Transcriber>>,
+    /// With [`Session::transcriber`]: the stand-in for other languages and failures (Whisper's
+    /// role).
+    pub transcriber_fallback: Option<Arc<dyn filmcraft_speech::Transcriber>>,
+    /// With [`Session::transcriber`]: the speaker embedding model (TitaNet's role).
+    pub speaker_embedder: Option<Arc<dyn filmcraft_speech::speakers::Embedder>>,
+    /// Transcription jobs whose results are applied when they finish.
+    pub transcribe_jobs: Vec<transcription::Pending>,
+    /// What each transcription job left out (reported with its result).
+    pub transcribe_skipped: std::collections::HashMap<u64, Vec<Value>>,
+    /// Reports of recent finished transcription jobs (`jobs.list` shows them as `result`).
+    pub transcribe_reports: Vec<(u64, Value)>,
     /// The Events panel log: failed commands, job results, auto-save errors, messages.
     pub log: panels::EventLog,
     /// Media Browser navigation (directory, back / forward history, selected files).
@@ -735,6 +747,11 @@ impl Session {
             export_queue: Default::default(),
             stepped: Vec::new(),
             transcriber: None,
+            transcriber_fallback: None,
+            speaker_embedder: None,
+            transcribe_jobs: Vec::new(),
+            transcribe_skipped: Default::default(),
+            transcribe_reports: Vec::new(),
             log: Default::default(),
             browser: Default::default(),
             exec_depth: 0,
@@ -833,6 +850,7 @@ impl Session {
         proxies::poll(self);
         masks::poll(self);
         scene_detect::poll(self);
+        transcription::poll(self);
         export_tools::pump_queue(self, false);
         review::poll(self);
         panels::log_jobs(self);

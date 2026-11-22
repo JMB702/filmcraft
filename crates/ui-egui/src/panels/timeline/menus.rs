@@ -56,7 +56,7 @@ pub(crate) const CLIP_MENU: &[&[(&str, &str)]] = &[
     ],
     &[("Label", "edit.label")],
     &[("Add Marker", "markers.add")],
-    &[("Speed/Duration…", "clip.speedDuration"), ("Scene Edit Detection…", "clip.sceneEditDetection")],
+    &[("Speed/Duration…", "clip.speedDuration"), ("Scene Edit Detection…", "clip.sceneEditDetection"), ("Transcribe…", "transcript.generate")],
     &[
         ("Frame Hold Options…", "clip.frameHoldOptions"),
         ("Add Frame Hold", "clip.frameHold"),
@@ -210,6 +210,10 @@ fn track_header_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, label: &str, tra
     ui.separator();
     item(ui, "deleteTrack", tl!("Delete Track"), "sequence.deleteTrack", json!({"track": track.0}));
     item(ui, "deleteTracks", tl!("Delete Tracks…"), "sequence.deleteTracks", json!({}));
+    if !video {
+        ui.separator();
+        item(ui, "transcribe", tl!("Transcribe Track…"), "transcript.generate", json!({"dialog": {"scope": "track", "track": label}}));
+    }
 }
 
 /// Opens the track header menu on a right-click anywhere on `visible`, a header, even over its

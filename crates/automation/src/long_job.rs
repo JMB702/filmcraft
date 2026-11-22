@@ -15,8 +15,18 @@ use serde_json::{Value, json};
 
 use crate::server::FilmcraftMcp;
 
-/// Engine commands that block until a render is written when called with `wait: true`.
-pub const LONG_COMMANDS: &[&str] = &["file.exportMedia"];
+/// Engine commands that run as a job and, called with `wait: true`, are polled to the end here
+/// (progress reported, cancellable): exports, transcriptions and model downloads.
+pub const LONG_COMMANDS: &[&str] = &["file.exportMedia", "transcript.generate", "transcript.downloadModel"];
+
+/// How a long command's failure reads: `export failed: …`.
+pub fn failure_prefix(id: &str) -> &'static str {
+    match id {
+        "transcript.generate" => "transcription failed",
+        "transcript.downloadModel" => "download failed",
+        _ => "export failed",
+    }
+}
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);
@@ -76,7 +86,7 @@ impl FilmcraftMcp {
                 let offline = state.as_ref().and_then(|j| j.get("offlineMedia").cloned());
                 let result = state.map(|j| j["result"].clone()).unwrap_or(Value::Null);
                 if let Some(e) = result.get("error").and_then(Value::as_str) {
-                    return CallToolResult::error(vec![Content::text(format!("export failed: {e}"))]);
+                    return CallToolResult::error(vec![Content::text(format!("{}: {e}", failure_prefix(id)))]);
                 }
                 let mut out = start;
                 if let Some(o) = out.as_object_mut() {
@@ -100,7 +110,9 @@ impl FilmcraftMcp {
             }
             tokio::time::sleep(POLL).await;
         }
-        remove_partial(&out, started);
+        if id == "file.exportMedia" {
+            remove_partial(&out, started);
+        }
         CallToolResult::error(vec![Content::text("cancelled")])
     }
 

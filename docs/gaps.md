@@ -9,7 +9,7 @@ work. This is the work list: agents should prefer it over adding checklist items
 [target-app-parity.md](target-app-parity.md); estimates are Opus 5.5 agent-hours, calibrated there.
 When you close or shrink a gap, update its entry, its parity doc and the revision history.
 
-Summary by kind: **feature gaps** G1, G2, G12, G13, G18, G19; **UI / UX** G8; **file formats**
+Summary by kind: **feature gaps** G1, G2, G12, G13, G18; **UI / UX** G8; **file formats**
 G2, G10, G13, G15; **codecs** G3, G10; **hardware** G5; **localization** G14; **stability and
 platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement** G1, G6, G7;
 **web** G20.
@@ -34,7 +34,6 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | G16 | Performance reports on 0.5.0 | performance | partly | 30–60 h |
 | G17 | Audio device and playback reliability | stability | partly | 20–40 h |
 | G18 | Effects depth: approximations and missing behaviour | feature | no | 60–110 h |
-| G19 | Speech to text off in release builds | feature, AI | no | 5–10 h |
 | G20 | The web app shell | platforms | no | 40–80 h |
 
 ## G1. Nothing compares our output with Premiere's
@@ -254,7 +253,8 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 - **Missing:** Object Mask (Premiere 26.0, #406, #694), Generative Extend (needs a large video
   model; not reachable locally), media-intelligence search, caption translation, model-based
   Enhance Speech, Auto Reframe beyond heuristics, auto colour, Auto-Tag Audio Types.
-- **Have:** local Whisper transcription (off in releases, G19), Kokoro-82M text-to-speech
+- **Have:** local transcription in release builds (Parakeet and Whisper, speaker labels across
+  clips, [transcripts.md](transcripts.md)), Kokoro-82M text-to-speech
   narration (#278), scene edit detection, colour match.
 - **Needs:** openly licensed models we can ship. **150–300 h.**
 
@@ -366,12 +366,6 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   them moves them all in one undo step (#3150).
 - **Estimate:** 60–110 h.
 
-## G19. Speech to text off in release builds
-
-- **Missing:** the `whisper` feature is off by default and in releases, so Transcribe Sequence,
-  text-based editing and auto captions need a source build.
-- **Estimate:** 5–10 h (model download UX, licence check).
-
 ## G20. The web app shell
 
 - **Missing:** file access, WebCodecs decode, audio in the browser build beyond what exists.
@@ -381,6 +375,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-21 | minor | Removed G19: release builds transcribe (Parakeet by default, Whisper second, speaker labels across clips, background jobs, Transcribe dialog) |
 | 2026-11-01 | major | G2: `.prproj` import ships (File ▸ Open, File ▸ Import, CLI import): structure, timing, multi-camera, Motion / Opacity / Transform / Volume; the entry now lists what is not carried over; no longer blocks beta outright, estimate 30–60 h |
 | 2026-10-30 | minor | G14: three key languages have no catalog (Hindi, Arabic, Vietnamese); Korean, Italian, German and Russian are near-complete; Ukrainian is menus only; G13 GIF transparency retained |
 | 2026-10-12 | minor | Removed shipped items: AVI import (#598), FLAC in MP4 (#603), multicam paging, deselect on empty space (#683), Project marquee (#578), image-sequence downloads in Chrome (#378), slow interchange import (#461) |

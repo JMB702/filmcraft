@@ -11,8 +11,14 @@ build = "build.rs"
 workspace = true
 
 [features]
-default = []
-# Speech-to-text (Text panel ▸ Transcribe) with Whisper on the CPU, and model downloads.
+# Release builds transcribe (docs/transcripts.md); the models download on first use.
+default = ["transcription"]
+# Speech-to-text (Text panel ▸ Transcribe…): Parakeet, Whisper for other languages, neural
+# speaker labels, and model downloads.
+transcription = ["parakeet", "whisper"]
+# NVIDIA Parakeet speech-to-text and TitaNet speaker labels (candle; Metal on macOS).
+parakeet = ["filmcraft-engine/parakeet", "filmcraft-engine/speech-download"]
+# Whisper speech-to-text (candle; Metal on macOS), and model downloads.
 whisper = ["filmcraft-engine/whisper", "filmcraft-engine/speech-download"]
 # Natural Text to Speech voices (Kokoro-82M on the CPU, downloaded on first use).
 neural-voices = ["filmcraft-engine/neural-voices"]
