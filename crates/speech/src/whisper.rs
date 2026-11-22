@@ -99,7 +99,7 @@ impl Whisper {
         w
     }
 
-    fn detect_language(&self, m: &mut Model, xa: &Tensor) -> Result<String, SpeechError> {
+    fn language_of(&self, m: &mut Model, xa: &Tensor) -> Result<String, SpeechError> {
         m.decoder.reset();
         let (logits, _) = m.decoder.forward(&[self.tok.sot], xa, false, None).map_err(merr)?;
         let l = Model::last_logits(&logits).map_err(merr)?;
@@ -264,6 +264,20 @@ impl Transcriber for Whisper {
         self.id.clone()
     }
 
+    fn detect_language(&self, audio: &[f32]) -> Result<Option<String>, SpeechError> {
+        if !self.tok.multilingual() {
+            return Ok(None);
+        }
+        let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
+        let n_mels = m.cfg.num_mel_bins;
+        let mut padded = audio[..audio.len().min(N_FRAMES * SAMPLES_PER_FRAME)].to_vec();
+        padded.extend(std::iter::repeat_n(0.0, N_FRAMES * SAMPLES_PER_FRAME));
+        let (frames, mel) = crate::mel::log_mel(&padded, n_mels);
+        let x = Tensor::from_vec(Self::window(&mel, n_mels, frames, 0), (1, n_mels, N_FRAMES), &m.device).map_err(merr)?;
+        let xa = m.encoder.forward(&x).map_err(merr)?;
+        self.language_of(&mut m, &xa).map(Some)
+    }
+
     fn transcribe(&self, audio: &[f32], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError> {
         let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
         let n_mels = m.cfg.num_mel_bins;
@@ -300,7 +314,7 @@ impl Transcriber for Whisper {
             let mut prompt = vec![self.tok.sot];
             if self.tok.multilingual() {
                 if language.is_none() {
-                    language = Some(self.detect_language(&mut m, &xa)?);
+                    language = Some(self.language_of(&mut m, &xa)?);
                 }
                 let lang = language.as_deref().unwrap_or("en");
                 prompt.push(self.tok.language_token(lang).unwrap_or(self.tok.sot + 1));
@@ -344,7 +358,8 @@ impl Transcriber for Whisper {
             }
             seek += advance;
         }
-        let mut t = Transcript { language: language.unwrap_or_else(|| "en".into()), source: self.id.clone(), speakers: Vec::new(), words };
+        let mut t =
+            Transcript { language: language.unwrap_or_else(|| "en".into()), source: self.id.clone(), speakers: Vec::new(), words, ..Default::default() };
         t.normalize();
         crate::vad::tighten_words(audio, &mut t.words);
         if opts.diarize && !t.words.is_empty() {

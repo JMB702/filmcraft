@@ -60,6 +60,51 @@ pub fn normalize_word(s: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Speaker {
     pub name: String,
+    /// The speaker's voiceprint in this clip (unit-length speaker embedding of the model named by
+    /// the transcript's `voice_model`); empty when speakers were labelled without a model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embedding: Vec<f32>,
+}
+
+impl Speaker {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into(), embedding: Vec::new() }
+    }
+}
+
+/// Longest voiceprint kept ([`Transcript::normalize`] and [`Voice::check`] drop longer ones).
+pub const MAX_EMBEDDING: usize = 4096;
+
+fn embedding_ok(e: &[f32]) -> bool {
+    e.len() <= MAX_EMBEDDING && e.iter().all(|v| v.is_finite())
+}
+
+/// A named voice of the project (Text panel ▸ Transcript ▸ speaker names): when a speaker is named,
+/// its voiceprint is kept here, so later transcriptions in this project recognise the voice and
+/// label it by name. Project-scoped: voiceprints are biometric data about the people recorded.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Voice {
+    pub name: String,
+    /// The speaker embedding model the voiceprint comes from (`"titanet-large"`).
+    pub model: String,
+    /// Unit-length mean of the speaker's embeddings.
+    pub embedding: Vec<f32>,
+    /// Seconds of speech the voiceprint was averaged over (weights later updates).
+    #[serde(default)]
+    pub seconds: f64,
+}
+
+impl Voice {
+    /// The voice is usable: a non-empty name and a finite, bounded voiceprint.
+    pub fn check(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("a voice needs a name".into());
+        }
+        if self.embedding.is_empty() || !embedding_ok(&self.embedding) {
+            return Err(format!("voice {:?}: invalid voiceprint", self.name));
+        }
+        Ok(())
+    }
 }
 
 /// Longest speaker name [`Transcript::speaker_name`] hands out, in bytes.
@@ -74,8 +119,13 @@ pub const MAX_SPEAKERS: u32 = 1024;
 pub struct Transcript {
     /// ISO 639-1 code of the spoken language (`"en"`).
     pub language: String,
-    /// What produced it: a model id (`"whisper-base"`), `"imported"` or `"manual"`.
+    /// What produced it: a model id (`"parakeet-tdt-0.6b-v2"`, `"whisper-base"`), `"imported"` or
+    /// `"manual"`.
     pub source: String,
+    /// The speaker embedding model of the speakers' voiceprints (`"titanet-large"`); empty when
+    /// there are none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub voice_model: String,
     pub speakers: Vec<Speaker>,
     /// Words in time order, non-overlapping.
     pub words: Vec<Word>,
@@ -129,6 +179,11 @@ impl Transcript {
                 self.words[i - 1].end = s.max(self.words[i - 1].start);
             }
         }
+        for sp in &mut self.speakers {
+            if !embedding_ok(&sp.embedding) {
+                sp.embedding.clear();
+            }
+        }
         // The largest index sizes the label table, so a single hostile word must not make it
         // allocate billions of labels: indices past the ceiling lose their speaker.
         for w in &mut self.words {
@@ -140,7 +195,7 @@ impl Transcript {
         if let Some(m) = max {
             while self.speakers.len() <= m as usize {
                 let n = self.speakers.len() + 1;
-                self.speakers.push(Speaker { name: format!("Speaker {n}") });
+                self.speakers.push(Speaker::new(format!("Speaker {n}")));
             }
         }
     }
@@ -188,7 +243,7 @@ mod tests {
     #[test]
     fn a_huge_speaker_name_is_cut_at_a_character_boundary() {
         let name = "é".repeat(MAX_SPEAKER_NAME_BYTES); // two bytes each: the cut lands on a boundary
-        let mut t = Transcript { words: vec![w("a", 0, 10)], speakers: vec![Speaker { name: name.clone() }], ..Default::default() };
+        let mut t = Transcript { words: vec![w("a", 0, 10)], speakers: vec![Speaker::new(name.clone())], ..Default::default() };
         t.words[0].speaker = Some(0);
         let got = t.speaker_name(&t.words[0]).unwrap();
         assert_eq!(got.len(), MAX_SPEAKER_NAME_BYTES);

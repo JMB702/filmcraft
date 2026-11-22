@@ -332,6 +332,15 @@ fn item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: ItemId, kind: &ItemK
         actions.push(("clip.interpretFootage".into(), json!({"items": items.iter().map(|i| i.0).collect::<Vec<_>>()})));
         ui.close();
     }
+    // the Transcribe dialog, for every selected item when the one right-clicked is among them
+    let b = ui.add_enabled(app.session.is_enabled("transcript.generate"), egui::Button::new(tl!("Transcribe…")));
+    app.auto.add("project.itemMenu.transcribe", b.rect, tl!("Transcribe…"));
+    if b.clicked() {
+        let items = menu_targets(&app.session.state.project_selection, id);
+        actions.push(("project.select".into(), json!({"items": items.iter().map(|i| i.0).collect::<Vec<_>>()})));
+        actions.push(("transcript.generate".into(), json!({"dialog": {"scope": "items"}})));
+        ui.close();
+    }
     // subclips: Make Subclip (media), Edit Subclip and Convert to Master Clip (subclips)
     let subclip_items: Vec<(&str, &str, &str)> = match kind {
         ItemKind::Media(_) => vec![("makeSubclip", tl!("Make Subclip…"), "clip.makeSubclip")],

@@ -173,3 +173,112 @@ fn transcribe_is_disabled_without_speech_to_text() {
     d.frames(3);
     assert_eq!(d.harness.state().session.history.undo.len(), undo, "nothing ran");
 }
+
+/// The Transcribe dialog opens from the Text panel, the timeline's clip and track menus and the
+/// Project panel (each preset to its scope), runs the job in the background, and the Transcript
+/// tab then shows each speaker in its colour with a menu to rename, merge and reassign.
+/// `engine.execute transcript.generate` (automation) never opens the dialog.
+#[test]
+fn transcribe_dialog_runs_a_background_job_and_speakers_can_be_renamed() {
+    use filmcraft_project::{Transcript, Word};
+    use filmcraft_time::Tick;
+    let mut d = Driver::demo();
+    let mut t = Transcript { language: "en".into(), ..Default::default() };
+    t.words.push(Word::new("Hello", Tick::from_seconds_f64(0.1), Tick::from_seconds_f64(0.4)));
+    d.harness.state_mut().session.transcriber = Some(std::sync::Arc::new(filmcraft_speech::FixedTranscriber { transcript: t, id: "fixed".into() }));
+    d.ok("ui.set", json!({"workspace": "Captions and Graphics"}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "text.tab.Transcript"}));
+    d.frames(3);
+
+    // the empty state's button opens the dialog (the whole sequence: nothing is selected)
+    d.ok("ui.click", json!({"id": "text.transcript.generate"}));
+    d.frames(3);
+    let dialog = |d: &mut Driver| d.harness.state().ui.extras.dialog.clone();
+    let open = dialog(&mut d).expect("the Transcribe dialog");
+    assert_eq!(open.command, "transcript.generate");
+    assert_eq!(open.params["scope"], "sequence", "{}", open.params);
+    assert_eq!(open.params["diarize"], json!(true), "speaker detection is on by default");
+    assert_eq!(open.params["replace"], json!(true));
+    for id in ["transcribe.ok", "transcribe.cancel", "transcribe.scope.sequence", "transcribe.scope.track", "transcribe.diarize", "transcribe.replace"] {
+        assert_eq!(d.ids(id), vec![id.to_string()], "{id}");
+    }
+    d.ok("ui.click", json!({"id": "transcribe.cancel"}));
+    d.frames(2);
+    assert!(dialog(&mut d).is_none());
+
+    // a track header's menu presets one track; the Project panel's item menu, the items
+    d.ok("ui.menu.invoke", json!({"id": "transcript.generate", "params": {"dialog": {"scope": "track", "track": "A1"}}}));
+    d.frames(2);
+    let open = dialog(&mut d).unwrap();
+    assert_eq!((open.params["scope"].as_str(), open.params["track"].as_str()), (Some("track"), Some("A1")));
+    d.ok("ui.click", json!({"id": "transcribe.cancel"}));
+    d.frames(2);
+
+    // automation runs the job directly; the dialog stays closed
+    let undo = d.harness.state().session.history.undo.len();
+    let r = d.ok("engine.execute", json!({"command": "transcript.generate", "params": {"track": "A1", "diarize": false}}));
+    assert!(r["job"].is_u64(), "{r}");
+    assert!(dialog(&mut d).is_none());
+    for _ in 0..600 {
+        if d.harness.state().session.history.undo.len() > undo {
+            break;
+        }
+        d.frames(1);
+    }
+    assert_eq!(d.harness.state().session.history.undo.len(), undo + 1, "one undo step");
+    let words = d.ok("engine.execute", json!({"command": "transcript.inspect", "params": {}}));
+    // every media item of A1 has a transcript by the fake recogniser
+    assert!(!words["items"].as_array().unwrap().is_empty() && words["items"].as_array().unwrap().iter().all(|i| i["source"] == "fixed"), "{words}");
+
+    // the dialog's own OK runs the job too (sequence scope, replacing what is there)
+    d.ok("ui.menu.invoke", json!({"id": "sequence.transcribe", "params": {}}));
+    d.frames(2);
+    assert_eq!(dialog(&mut d).unwrap().params["scope"], "sequence");
+    d.ok("ui.click", json!({"id": "transcribe.ok"}));
+    d.frames(2);
+    assert!(dialog(&mut d).is_none(), "OK closes the dialog: {:?}", dialog(&mut d).map(|x| x.error));
+    for _ in 0..600 {
+        if d.harness.state().session.history.undo.len() > undo + 1 {
+            break;
+        }
+        d.frames(1);
+    }
+    assert_eq!(d.harness.state().session.history.undo.len(), undo + 2);
+
+    // two named speakers: their paragraphs have a menu that renames one (remembering the voice)
+    let a = d.harness.state().session.active_sequence().unwrap().audio_tracks[0].items[0].clone();
+    let tk = |s: f64| a.source_in.0 + (s * filmcraft_time::TICKS_PER_SECOND as f64) as i64;
+    let words: Vec<Value> = ["One", "two", "three", "four"]
+        .iter()
+        .enumerate()
+        .map(|(i, w)| json!({"text": w, "start": tk(0.5 + i as f64 * 0.5), "end": tk(0.9 + i as f64 * 0.5), "speaker": i / 2}))
+        .collect();
+    d.ok(
+        "engine.execute",
+        json!({"command": "transcript.set", "params": {"item": a.item.0, "transcript": {"language": "en", "speakers": [{"name": "Speaker 1"}, {"name": "Speaker 2"}], "words": words}}}),
+    );
+    d.frames(3);
+    let els = d.ok("ui.elements", json!({"prefix": "text.transcript.paragraph.0"}));
+    let head = els.as_array().unwrap().iter().find(|e| e["id"] == "text.transcript.paragraph.0").expect("paragraph header").clone();
+    assert_eq!(head["label"], "Speaker 1", "{head}");
+    let rect = head["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>();
+    d.ok("ui.click", json!({"x": rect[0] + 10.0, "y": rect[1] + rect[3] / 2.0, "button": "right"}));
+    d.frames(3);
+    for id in ["text.transcript.paragraph.0.rename", "text.transcript.paragraph.0.merge", "text.transcript.paragraph.0.assign"] {
+        assert_eq!(d.ids(id).first().map(String::as_str), Some(id), "the speaker menu offers {id}");
+    }
+    d.ok("ui.click", json!({"id": "text.transcript.paragraph.0.rename"}));
+    d.frames(1);
+    // the field starts with the current name; the click put the cursor in it
+    d.ok("ui.key", json!({"key": "End"}));
+    for _ in 0.."Speaker 1".len() {
+        d.ok("ui.key", json!({"key": "Backspace"}));
+    }
+    d.ok("ui.type", json!({"text": "Ada"}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "text.transcript.paragraph.0.renameOk"}));
+    d.frames(3);
+    let sp = d.ok("engine.execute", json!({"command": "transcript.speakers", "params": {}}));
+    assert!(sp.to_string().contains("Ada"), "{sp}");
+}

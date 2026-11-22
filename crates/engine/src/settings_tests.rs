@@ -648,7 +648,7 @@ fn auto_transcribe_sequence_clips_after_insertion() {
         if automatic {
             assert_eq!(s.project.transcripts[&item].words[0].text, "hello");
         }
-        s.execute("transcript.generate", json!({"items": [item.0]})).unwrap();
+        s.execute("transcript.generate", json!({"items": [item.0], "wait": true})).unwrap();
         assert_eq!(s.project.transcripts[&item].words[0].text, "hello");
         if automatic != audio {
             missing.push(command);

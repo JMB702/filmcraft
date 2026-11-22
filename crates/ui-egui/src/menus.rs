@@ -196,6 +196,11 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
     if let Some(marker) = edit_marker_at_playhead(app, id, &params) {
         return Ok(json!({"dialog": "markerProperties", "marker": marker}));
     }
+    // Transcribe… from a menu, button or context menu opens its dialog (`dialog` presets it);
+    // `engine.execute` (automation) runs the job with the parameters it gives
+    if id == "transcript.generate" && (params.as_object().is_none_or(|m| m.is_empty()) || params.get("dialog").is_some()) {
+        return crate::panels::menu_dialogs::open_transcribe(app, params.get("dialog").unwrap_or(&Value::Null));
+    }
     // Stepping the Program playhead by frames plays the frame's sound (audio during scrubbing).
     let program_step =
         matches!(id, "playhead.stepBack" | "playhead.stepForward" | "playhead.stepBack5" | "playhead.stepForward5") && !targets_source(app, &params);

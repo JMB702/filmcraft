@@ -8,7 +8,11 @@
 //!   `download`) the verified downloader. Weights are **never** bundled or committed.
 //! - [`whisper`] (feature `whisper`): Whisper inference in pure Rust on candle, with timestamp
 //!   decoding, language detection and word-level timestamps from cross-attention alignment (DTW).
-//! - [`diarize`]: speaker labelling by clustering per-chunk MFCC statistics (classical, no model).
+//! - [`parakeet`] (feature `parakeet`): NVIDIA Parakeet TDT speech recognition on candle (Metal
+//!   on macOS), the default engine.
+//! - [`titanet`] (feature `parakeet`) and [`speakers`]: neural speaker embeddings and speaker
+//!   labels clustered across every clip of a job.
+//! - [`diarize`]: the fallback speaker labelling by clustering per-chunk MFCC statistics (no model).
 //! - [`mel`]: the log-mel front end shared by Whisper and diarization.
 //! - [`vad`]: energy-based tightening of word bounds (keeps pauses out of words).
 //!
@@ -19,6 +23,13 @@
 pub mod diarize;
 pub mod mel;
 pub mod models;
+#[cfg(any(feature = "whisper", feature = "parakeet"))]
+pub mod nemo;
+#[cfg(feature = "parakeet")]
+pub mod parakeet;
+pub mod speakers;
+#[cfg(feature = "parakeet")]
+pub mod titanet;
 pub mod vad;
 #[cfg(feature = "whisper")]
 pub mod whisper;
@@ -50,6 +61,8 @@ pub enum SpeechError {
     NotInstalled(String),
     #[error("unknown speech model `{0}`")]
     UnknownModel(String),
+    #[error("the model does not transcribe the language `{0}`")]
+    Language(String),
     #[error("speech-to-text is not available in this build ({0})")]
     Unavailable(String),
     #[error("model: {0}")]
@@ -90,6 +103,14 @@ pub type ProgressFn<'a> = &'a mut dyn FnMut(f32, &str) -> bool;
 pub trait Transcriber: Send + Sync {
     /// Stable id of the model (`"whisper-base"`), stored in the transcript's `source`.
     fn id(&self) -> String;
+    /// The ISO 639-1 codes the model transcribes; `None` = any language it can detect.
+    fn languages(&self) -> Option<&'static [&'static str]> {
+        None
+    }
+    /// The spoken language of the first 30 s of `audio` (ISO 639-1), if the model can tell.
+    fn detect_language(&self, _audio: &[f32]) -> Result<Option<String>, SpeechError> {
+        Ok(None)
+    }
     /// Transcribe mono 16 kHz `audio`. Word times are relative to the first sample.
     fn transcribe(&self, audio: &[f32], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError>;
 }
@@ -118,25 +139,61 @@ impl Transcriber for FixedTranscriber {
     }
 }
 
-/// Load the transcriber for catalogue model `id` from `models_dir` (feature `whisper`).
+/// Load the transcriber for catalogue model `id` from `models_dir`.
 pub fn load(models_dir: &std::path::Path, id: &str) -> Result<std::sync::Arc<dyn Transcriber>, SpeechError> {
     let m = models::find(id).ok_or_else(|| SpeechError::UnknownModel(id.into()))?;
+    if !engine_available(m.engine) {
+        return Err(SpeechError::Unavailable(format!("built without the `{}` feature", m.engine.feature())));
+    }
     if !models::installed(models_dir, m) {
         return Err(SpeechError::NotInstalled(id.into()));
     }
-    #[cfg(feature = "whisper")]
-    {
-        Ok(std::sync::Arc::new(whisper::Whisper::load(&models::model_dir(models_dir, m), m.id)?))
-    }
-    #[cfg(not(feature = "whisper"))]
-    {
-        Err(SpeechError::Unavailable("built without the `whisper` feature".into()))
+    let dir = models::model_dir(models_dir, m);
+    match m.engine {
+        #[cfg(feature = "whisper")]
+        models::Engine::Whisper => Ok(std::sync::Arc::new(whisper::Whisper::load(&dir, m.id)?)),
+        #[cfg(feature = "parakeet")]
+        models::Engine::Parakeet => Ok(std::sync::Arc::new(parakeet::Parakeet::load(&dir, m.id, m.languages)?)),
+        _ => {
+            let _ = dir;
+            Err(SpeechError::Unavailable(format!("`{id}` is not a speech recogniser")))
+        }
     }
 }
 
-/// Whether this build can run speech models.
+/// Load the speaker embedding model `id` from `models_dir`.
+pub fn load_embedder(models_dir: &std::path::Path, id: &str) -> Result<std::sync::Arc<dyn speakers::Embedder>, SpeechError> {
+    let m = models::find(id).ok_or_else(|| SpeechError::UnknownModel(id.into()))?;
+    if m.engine != models::Engine::Speaker {
+        return Err(SpeechError::UnknownModel(id.into()));
+    }
+    if !engine_available(m.engine) {
+        return Err(SpeechError::Unavailable(format!("built without the `{}` feature", m.engine.feature())));
+    }
+    if !models::installed(models_dir, m) {
+        return Err(SpeechError::NotInstalled(id.into()));
+    }
+    #[cfg(feature = "parakeet")]
+    {
+        Ok(std::sync::Arc::new(titanet::TitaNet::load(&models::model_dir(models_dir, m))?))
+    }
+    #[cfg(not(feature = "parakeet"))]
+    {
+        Err(SpeechError::Unavailable("built without the `parakeet` feature".into()))
+    }
+}
+
+/// Whether this build can run models of `engine`.
+pub const fn engine_available(engine: models::Engine) -> bool {
+    match engine {
+        models::Engine::Whisper => cfg!(feature = "whisper"),
+        models::Engine::Parakeet | models::Engine::Speaker => cfg!(feature = "parakeet"),
+    }
+}
+
+/// Whether this build can run any speech recogniser.
 pub const fn available() -> bool {
-    cfg!(feature = "whisper")
+    cfg!(feature = "whisper") || cfg!(feature = "parakeet")
 }
 
 /// Mix a multi-channel buffer down to mono.

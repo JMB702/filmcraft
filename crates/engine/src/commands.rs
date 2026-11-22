@@ -1947,7 +1947,7 @@ fn build() -> Vec<CommandSpec> {
                     // silently untranscribed (#89)
                     let r = crate::transcript::can_transcribe(s)
                         .map_err(EngineError::Other)
-                        .and_then(|()| s.execute("transcript.generate", json!({"items": audio})));
+                        .and_then(|()| s.execute("transcript.generate", json!({"items": audio, "wait": true})));
                     if let Err(e) = r {
                         errors.push(format!("transcription: {e}"));
                     }
@@ -2158,7 +2158,11 @@ fn build() -> Vec<CommandSpec> {
             has_seq,
             crate::export_tools::export_media
         ),
-        query!("jobs.list", "List Jobs", "{}", |s, _| Ok(Value::Array(s.jobs.iter().map(|j| crate::export_tools::job_json(s, j)).collect()))),
+        query!("jobs.list", "List Jobs", "{}", |s, _| {
+            // a finished transcription is applied before it is reported finished
+            crate::transcription::poll(s);
+            Ok(Value::Array(s.jobs.iter().map(|j| crate::export_tools::job_json(s, j)).collect()))
+        }),
         query!("perf.stats", "Performance Statistics", "{}", |s, _| Ok(crate::perf::stats(s))),
         cmd!("jobs.cancel", "Cancel Job", [], None, r#"{"job":id}"#, always, |s, p| {
             let id = u64_p(p, "job").ok_or_else(|| bad("jobs.cancel", "need `job`"))?;

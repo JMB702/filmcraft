@@ -43,7 +43,7 @@ fn words(s: &mut Session) -> Vec<String> {
 fn generate_inspect_search_and_rename() {
     let (mut s, item, start) = session();
     assert!(s.execute("transcript.select", json!({"from": 0})).is_err(), "disabled before transcribing");
-    let r = s.execute("transcript.generate", json!({"items": [item.0]})).unwrap();
+    let r = s.execute("transcript.generate", json!({"items": [item.0], "wait": true})).unwrap();
     assert_eq!(r["items"][0]["words"], 6, "{r}");
     assert_eq!(r["items"][0]["source"], "fixed");
     assert_eq!(s.project.transcripts[&item].words.len(), 6);
@@ -75,7 +75,7 @@ fn generate_inspect_search_and_rename() {
 #[test]
 fn select_extract_and_lift_by_words() {
     let (mut s, item, _) = session();
-    s.execute("transcript.generate", json!({"items": [item.0]})).unwrap();
+    s.execute("transcript.generate", json!({"items": [item.0], "wait": true})).unwrap();
     let rate = s.sequence_rate();
     let before = s.active_sequence().unwrap().duration();
 
@@ -107,7 +107,7 @@ fn select_extract_and_lift_by_words() {
 #[test]
 fn remove_fillers_pauses_and_create_captions() {
     let (mut s, item, _) = session();
-    s.execute("transcript.generate", json!({"items": [item.0]})).unwrap();
+    s.execute("transcript.generate", json!({"items": [item.0], "wait": true})).unwrap();
     let before = s.active_sequence().unwrap().duration();
     let r = s.execute("transcript.removeFillers", json!({})).unwrap();
     assert_eq!(r["removed"], 1, "{r}");
@@ -168,7 +168,7 @@ fn generate_without_a_transcriber() {
     assert!(e.contains(why), "{e}");
     if !filmcraft_speech::available() {
         assert!(!s.is_enabled("sequence.transcribe"), "Transcribe Sequence follows transcript.generate");
-        let e = s.execute("transcript.generate", json!({"items": [item.0]})).unwrap_err().to_string();
+        let e = s.execute("transcript.generate", json!({"items": [item.0], "wait": true})).unwrap_err().to_string();
         assert!(e.contains("whisper") && e.contains("not available"), "{e}");
         #[cfg(not(feature = "speech-download"))]
         assert!(s.execute("transcript.downloadModel", json!({})).unwrap_err().to_string().contains("not available"));

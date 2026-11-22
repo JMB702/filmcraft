@@ -3,11 +3,14 @@
 //! Models are downloaded on first use, after the user confirms (the dialog shows the size, the
 //! source URL and the licence), into `<data dir>/models/<id>/`. They are never bundled with
 //! FilmCraft or committed to the repository. Every file is pinned to a Hugging Face revision of
-//! OpenAI's own repositories and checked against its SHA-256 before it is used.
+//! the publisher's own repository and checked against its SHA-256 before it is used.
 //!
-//! Licence: OpenAI released the Whisper code and model weights under the MIT licence
-//! (<https://github.com/openai/whisper/blob/main/LICENSE>); the safetensors conversions OpenAI
-//! publishes at `huggingface.co/openai/whisper-*` are labelled Apache-2.0. Both are permissive.
+//! - **Parakeet** (speech recognition, the default) and **TitaNet** (speaker embeddings): NVIDIA,
+//!   CC-BY-4.0. NVIDIA publishes them as `.nemo` files (uncompressed tar archives); only the
+//!   members FilmCraft reads are downloaded, as byte ranges of NVIDIA's file ([`ModelFile::offset`]).
+//! - **Whisper**: OpenAI released the code and model weights under the MIT licence
+//!   (<https://github.com/openai/whisper/blob/main/LICENSE>); the safetensors conversions OpenAI
+//!   publishes at `huggingface.co/openai/whisper-*` are labelled Apache-2.0.
 
 use std::path::{Path, PathBuf};
 
@@ -21,13 +24,48 @@ pub struct ModelFile {
     pub url: &'static str,
     pub sha256: &'static str,
     pub size: u64,
+    /// The file is `size` bytes of `url` starting here (a member of a `.nemo` archive), fetched
+    /// with an HTTP range request; `None` = the whole of `url`.
+    pub offset: Option<u64>,
+}
+
+/// What a model does and which runtime runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    /// OpenAI Whisper speech recognition (feature `whisper`).
+    Whisper,
+    /// NVIDIA Parakeet TDT speech recognition (feature `parakeet`).
+    Parakeet,
+    /// Speaker embeddings for speaker labels (feature `parakeet`).
+    Speaker,
+}
+
+impl Engine {
+    /// The cargo feature that builds this engine.
+    pub const fn feature(self) -> &'static str {
+        match self {
+            Engine::Whisper => "whisper",
+            Engine::Parakeet | Engine::Speaker => "parakeet",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "whisper" => Some(Engine::Whisper),
+            "parakeet" => Some(Engine::Parakeet),
+            _ => None,
+        }
+    }
 }
 
 /// A downloadable speech model.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct ModelInfo {
     pub id: &'static str,
+    pub engine: Engine,
     pub name: &'static str,
+    /// ISO 639-1 codes it transcribes; empty = any (Whisper detects the language).
+    pub languages: &'static [&'static str],
     /// Recognises languages other than English (and detects the language).
     pub multilingual: bool,
     pub description: &'static str,
@@ -51,15 +89,122 @@ const AUTHOR: &str = "OpenAI";
 
 macro_rules! hf {
     ($repo:literal, $rev:literal, $name:literal, $sha:literal, $size:expr) => {
-        ModelFile { name: $name, url: concat!("https://huggingface.co/openai/", $repo, "/resolve/", $rev, "/", $name), sha256: $sha, size: $size }
+        ModelFile { name: $name, url: concat!("https://huggingface.co/openai/", $repo, "/resolve/", $rev, "/", $name), sha256: $sha, size: $size, offset: None }
     };
 }
 
 const TOKENIZER_MULTI: &str = "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566";
 
+/// A member of an NVIDIA `.nemo` archive on Hugging Face.
+macro_rules! nemo {
+    ($repo:literal, $rev:literal, $file:literal, $name:literal, $offset:expr, $size:expr, $sha:literal) => {
+        ModelFile {
+            name: $name,
+            url: concat!("https://huggingface.co/nvidia/", $repo, "/resolve/", $rev, "/", $file),
+            sha256: $sha,
+            size: $size,
+            offset: Some($offset),
+        }
+    };
+}
+
+const NVIDIA_LICENSE: &str = "CC-BY-4.0 (NVIDIA)";
+const NVIDIA_LICENSE_URL: &str = "https://creativecommons.org/licenses/by/4.0/";
+
+/// The 25 languages of Parakeet TDT 0.6B v3.
+const EUROPEAN: &[&str] =
+    &["bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk"];
+
 static CATALOGUE: &[ModelInfo] = &[
     ModelInfo {
+        id: "parakeet-tdt-0.6b-v2",
+        engine: Engine::Parakeet,
+        name: "Parakeet TDT 0.6B v2 (English)",
+        languages: &["en"],
+        multilingual: false,
+        description: "600 M parameters, English with punctuation and capitals. The default: the most accurate English model here and fast on the GPU.",
+        license: NVIDIA_LICENSE,
+        license_url: NVIDIA_LICENSE_URL,
+        author: "NVIDIA",
+        source: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2",
+        files: &[
+            nemo!(
+                "parakeet-tdt-0.6b-v2",
+                "c00e38779b028d48624b08ab3d9909952db43901",
+                "parakeet-tdt-0.6b-v2.nemo",
+                "tokenizer.vocab",
+                263_168,
+                10_393,
+                "dbe7ec6bd066c4526080940e1614e6582b9161515e856c2c39a1d49267c88cbc"
+            ),
+            nemo!(
+                "parakeet-tdt-0.6b-v2",
+                "c00e38779b028d48624b08ab3d9909952db43901",
+                "parakeet-tdt-0.6b-v2.nemo",
+                "model_weights.ckpt",
+                298_496,
+                2_471_920_514,
+                "fb1cbe2765fb80c02c0f874b6ea2c2bd24048c3618c092584fd086c6366e48a9"
+            ),
+        ],
+    },
+    ModelInfo {
+        id: "parakeet-tdt-0.6b-v3",
+        engine: Engine::Parakeet,
+        name: "Parakeet TDT 0.6B v3 (25 European languages)",
+        languages: EUROPEAN,
+        multilingual: true,
+        description: "600 M parameters, 25 European languages with punctuation and capitals.",
+        license: NVIDIA_LICENSE,
+        license_url: NVIDIA_LICENSE_URL,
+        author: "NVIDIA",
+        source: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+        files: &[
+            nemo!(
+                "parakeet-tdt-0.6b-v3",
+                "541d1f99c6b0c3cd0b11a95167540bb8edefd82b",
+                "parakeet-tdt-0.6b-v3.nemo",
+                "tokenizer.vocab",
+                3_072,
+                101_024,
+                "41130ff456706304a1adec782ccc9e003c4d417e8e324353d281be958cac4e17"
+            ),
+            nemo!(
+                "parakeet-tdt-0.6b-v3",
+                "541d1f99c6b0c3cd0b11a95167540bb8edefd82b",
+                "parakeet-tdt-0.6b-v3.nemo",
+                "model_weights.ckpt",
+                680_448,
+                2_508_649_346,
+                "381d1cdc01457395bf9ca4f64a91bbe6d042b6fccd4d9aa88a52d15d63966d99"
+            ),
+        ],
+    },
+    ModelInfo {
+        id: "titanet-large",
+        engine: Engine::Speaker,
+        name: "TitaNet-large speaker embeddings",
+        languages: &[],
+        multilingual: true,
+        description: "23 M parameters. Tells voices apart for speaker labels (any language).",
+        license: NVIDIA_LICENSE,
+        license_url: NVIDIA_LICENSE_URL,
+        author: "NVIDIA",
+        source: "https://huggingface.co/nvidia/speakerverification_en_titanet_large",
+        files: &[nemo!(
+            "speakerverification_en_titanet_large",
+            "0dc382f40121a5fbd34db10a2bb04d826c2be6a8",
+            "speakerverification_en_titanet_large.nemo",
+            "model_weights.ckpt",
+            4_096,
+            101_611_209,
+            "7b17bd79997340b54032d386347727a6e9bc67f3a91041587175245156b86932"
+        )],
+    },
+    ModelInfo {
         id: "whisper-tiny",
+        engine: Engine::Whisper,
+        languages: &[],
         name: "Whisper tiny (multilingual)",
         multilingual: true,
         description: "39 M parameters. Fastest; fine for clear speech, rough on noisy audio.",
@@ -100,6 +245,8 @@ static CATALOGUE: &[ModelInfo] = &[
     },
     ModelInfo {
         id: "whisper-base",
+        engine: Engine::Whisper,
+        languages: &[],
         name: "Whisper base (multilingual)",
         multilingual: true,
         description: "74 M parameters. The default: a good balance of speed and accuracy.",
@@ -140,6 +287,8 @@ static CATALOGUE: &[ModelInfo] = &[
     },
     ModelInfo {
         id: "whisper-small",
+        engine: Engine::Whisper,
+        languages: &[],
         name: "Whisper small (multilingual)",
         multilingual: true,
         description: "244 M parameters. Most accurate here; about 4× slower than base.",
@@ -180,8 +329,21 @@ static CATALOGUE: &[ModelInfo] = &[
     },
 ];
 
-/// The default model.
-pub const DEFAULT_MODEL: &str = "whisper-base";
+/// The default speech recogniser.
+pub const DEFAULT_MODEL: &str = "parakeet-tdt-0.6b-v2";
+/// The default Whisper model (the fallback for languages Parakeet does not transcribe).
+pub const DEFAULT_WHISPER: &str = "whisper-base";
+/// The speaker embedding model.
+pub const SPEAKER_MODEL: &str = "titanet-large";
+
+/// The default model of `engine`.
+pub const fn default_for(engine: Engine) -> &'static str {
+    match engine {
+        Engine::Whisper => DEFAULT_WHISPER,
+        Engine::Parakeet => DEFAULT_MODEL,
+        Engine::Speaker => SPEAKER_MODEL,
+    }
+}
 
 pub fn catalogue() -> &'static [ModelInfo] {
     CATALOGUE
@@ -204,16 +366,42 @@ fn valid_name(name: &str) -> bool {
         && Path::new(name).file_name().is_some_and(|part| part == name)
 }
 
+/// What a verified file looked like: `size mtime-seconds mtime-nanoseconds sha256`. Stored beside
+/// it as `.<name>.verified` so a model of gigabytes is hashed once, not on every load; any change
+/// to the file's size or modification time makes it hash again.
+fn stamp(metadata: &std::fs::Metadata, sha: &str) -> Option<String> {
+    let t = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{} {} {} {}", metadata.len(), t.as_secs(), t.subsec_nanos(), sha.to_ascii_lowercase()))
+}
+
+fn stamp_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_string_lossy();
+    Some(path.with_file_name(format!(".{name}.verified")))
+}
+
 fn valid_file(path: &Path, file: &ModelFile) -> bool {
-    if !valid_name(file.name) || !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() == file.size) {
+    let Ok(metadata) = std::fs::metadata(path) else { return false };
+    if !valid_name(file.name) || !metadata.is_file() || metadata.len() != file.size {
         return false;
+    }
+    let expected = stamp(&metadata, file.sha256);
+    let stamp_file = stamp_path(path);
+    if let (Some(e), Some(sp)) = (&expected, &stamp_file)
+        && std::fs::read_to_string(sp).is_ok_and(|s| s.trim() == e)
+    {
+        return true;
     }
     let Ok(mut input) = std::fs::File::open(path) else { return false };
     let mut hasher = sha2::Sha256::new();
     if std::io::copy(&mut input, &mut hasher).is_err() {
         return false;
     }
-    format!("{:x}", hasher.finalize()).eq_ignore_ascii_case(file.sha256)
+    let ok = format!("{:x}", hasher.finalize()).eq_ignore_ascii_case(file.sha256);
+    if ok && let (Some(e), Some(sp)) = (expected, stamp_file) {
+        // best effort: without the stamp the file is only hashed again next time
+        let _ = std::fs::write(sp, e);
+    }
+    ok
 }
 
 /// All files present and matching their pinned size and SHA-256.
@@ -266,15 +454,40 @@ pub fn download_files(dir: &Path, files: &[ModelFile], progress: DownloadProgres
             continue;
         }
         let part = dir.join(format!("{}.part", f.name));
-        let resp = agent.get(f.url).call().map_err(|e| SpeechError::Download(format!("{}: {e}", f.url)))?;
+        // resume a part file left by an interrupted download (its bytes are hashed again)
+        let mut hasher = sha2::Sha256::new();
+        let mut got = 0u64;
+        if let Ok(mut old) = std::fs::File::open(&part) {
+            let len = old.metadata().map(|m| m.len()).unwrap_or(0);
+            if len > 0 && len < f.size && std::io::copy(&mut old, &mut hasher).ok() == Some(len) {
+                got = len;
+            } else {
+                hasher = sha2::Sha256::new();
+            }
+        }
+        let start = f.offset.unwrap_or(0).saturating_add(got);
+        let last = f.offset.unwrap_or(0).saturating_add(f.size).saturating_sub(1);
+        let ranged = f.offset.is_some() || got > 0;
+        let mut req = agent.get(f.url);
+        if ranged {
+            req = req.header("Range", &format!("bytes={start}-{last}"));
+        }
+        let resp = req.call().map_err(|e| SpeechError::Download(format!("{}: {e}", f.url)))?;
+        if ranged && resp.status().as_u16() != 206 {
+            return Err(SpeechError::Download(format!("{}: the server ignored the byte range (status {})", f.url, resp.status())));
+        }
         let mut body = resp.into_body();
         let mut reader = body.as_reader();
-        let mut out = std::io::BufWriter::new(std::fs::File::create(&part)?);
-        let mut hasher = sha2::Sha256::new();
+        let file = std::fs::OpenOptions::new().create(true).append(got > 0).write(true).truncate(got == 0).open(&part)?;
+        let mut out = std::io::BufWriter::new(file);
         let mut buf = vec![0u8; 1 << 20];
-        let mut got = 0u64;
         loop {
             let n = reader.read(&mut buf).map_err(|e| SpeechError::Download(format!("{}: {e}", f.name)))?;
+            if n == 0 {
+                break;
+            }
+            // never write past the pinned size, whatever the server sends
+            let n = n.min(usize::try_from(f.size.saturating_sub(got)).unwrap_or(usize::MAX));
             if n == 0 {
                 break;
             }
@@ -282,8 +495,8 @@ pub fn download_files(dir: &Path, files: &[ModelFile], progress: DownloadProgres
             out.write_all(&buf[..n])?;
             got += n as u64;
             if !progress(done + got, total, f.name) {
-                drop(out);
-                let _ = std::fs::remove_file(&part);
+                out.flush()?;
+                // keep the part file: the next download resumes it
                 return Err(SpeechError::Cancelled);
             }
         }
@@ -295,6 +508,12 @@ pub fn download_files(dir: &Path, files: &[ModelFile], progress: DownloadProgres
             return Err(SpeechError::Download(format!("{}: checksum mismatch (got {sha}, {got} bytes; expected {}, {} bytes)", f.name, f.sha256, f.size)));
         }
         std::fs::rename(&part, &dest)?;
+        // the bytes were just hashed: stamp the file so listing the models does not hash it again
+        if let (Ok(m), Some(sp)) = (std::fs::metadata(&dest), stamp_path(&dest))
+            && let Some(e) = stamp(&m, f.sha256)
+        {
+            let _ = std::fs::write(sp, e);
+        }
         done += f.size;
     }
     Ok(())
@@ -322,15 +541,22 @@ mod tests {
 
     #[test]
     fn catalogue_is_pinned_and_checksummed() {
-        assert!(find(DEFAULT_MODEL).is_some());
+        assert_eq!(find(DEFAULT_MODEL).map(|m| m.engine), Some(Engine::Parakeet));
+        assert_eq!(find(DEFAULT_WHISPER).map(|m| m.engine), Some(Engine::Whisper));
+        assert_eq!(find(SPEAKER_MODEL).map(|m| m.engine), Some(Engine::Speaker));
         for m in catalogue() {
             assert!(m.size() > 100_000_000, "{}", m.id);
             for f in m.files {
-                assert!(f.url.starts_with("https://huggingface.co/openai/whisper-"), "{}", f.url);
-                assert!(f.url.contains("/resolve/") && f.url.ends_with(f.name));
+                assert!(f.url.starts_with("https://huggingface.co/openai/whisper-") || f.url.starts_with("https://huggingface.co/nvidia/"), "{}", f.url);
+                assert!(f.url.contains("/resolve/"));
+                if f.offset.is_none() {
+                    assert!(f.url.ends_with(f.name));
+                } else {
+                    assert!(f.url.ends_with(".nemo"));
+                }
                 assert_eq!(f.sha256.len(), 64);
                 assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
-                if f.name == "tokenizer.json" {
+                if f.name == "tokenizer.json" && m.engine == Engine::Whisper {
                     assert_eq!(f.sha256, shared_tokenizer_sha());
                 }
             }
@@ -361,9 +587,12 @@ mod tests {
             url: "https://example.invalid/tiny.bin",
             sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             size: 3,
+            offset: None,
         }];
         let model = ModelInfo {
             id: "integrity-test",
+            engine: Engine::Whisper,
+            languages: &[],
             name: "integrity test",
             multilingual: false,
             description: "",
@@ -381,5 +610,15 @@ mod tests {
         assert_eq!(missing_bytes(root.path(), &model), 3);
         std::fs::write(directory.join("tiny.bin"), b"abc").unwrap();
         assert!(installed(root.path(), &model));
+        // verified once: the stamp records it
+        assert!(directory.join(".tiny.bin.verified").exists());
+        assert!(installed(root.path(), &model));
+        // a same-length change after verification (new modification time) is hashed again
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(directory.join("tiny.bin"), b"abd").unwrap();
+        assert!(!installed(root.path(), &model));
+        // a forged stamp for different content does not pass: its size or time differs
+        std::fs::write(directory.join(".tiny.bin.verified"), "3 0 0 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").unwrap();
+        assert!(!installed(root.path(), &model));
     }
 }
