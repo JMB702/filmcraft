@@ -47,7 +47,7 @@ use interact::{interact, move_transition_preview, preview_drag};
 use layout::new_track_at;
 pub(crate) use layout::reveal_playhead;
 use layout::video_row_tops;
-pub use layout::{Layout, Row, max_scroll, min_pps, scroll_to_reveal, timeline_extent, zoom_about};
+pub use layout::{Layout, Panes, Row, max_scroll, min_pps, scroll_to_reveal, timeline_extent, zoom_about};
 #[cfg(test)]
 pub(crate) use menus::{CLIP_MENU, EDIT_POINT_TYPES};
 use ruler::draw_top;
@@ -338,7 +338,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         rows.push(Row { track: tr.id, kind: TrackKind::Audio, index: i, rect, lane: app.ui.timeline.track_lanes.contains_key(&tr.id.0) });
     }
     let (v_scroll, a_scroll) = (app.ui.timeline.v_scroll, app.ui.timeline.a_scroll);
-    let layout = Layout { content, ruler, rows: rows.clone(), pps, scroll, split_y, v_scroll, a_scroll };
+    let panes = Panes { video_top: video_area.min.y, audio_bottom: audio_area.max.y, max_v_scroll: max_vs, max_a_scroll: max_as };
+    let layout = Layout { content, ruler, rows: rows.clone(), pps, scroll, split_y, v_scroll, a_scroll, panes };
     app.tl.layout = Some(layout.clone());
 
     // ---- backgrounds
@@ -1012,6 +1013,7 @@ mod waveform_drag_anchor_tests {
             split_y: 0.0,
             v_scroll: 0.0,
             a_scroll: 0.0,
+            panes: Default::default(),
         }
     }
 
@@ -1197,6 +1199,7 @@ mod new_track_tests {
             split_y: 200.0,
             v_scroll: 0.0,
             a_scroll: 0.0,
+            panes: Default::default(),
         };
         let at = |y| new_track_at(&seq, &layout, y, 50.0, 50.0);
         assert_eq!(at(40.0), Some((TrackKind::Video, Rect::from_min_max(pos2(0.0, 100.0), pos2(800.0, 150.0)))));
@@ -1234,6 +1237,7 @@ mod new_track_tests {
             split_y,
             v_scroll: 0.0,
             a_scroll: 0.0,
+            panes: Default::default(),
         };
         let at = |y: f32| layout.row_at(y).map(|r| r.track.0);
         assert_eq!(at(260.0), Some(1), "V1 above the divider");
@@ -1277,6 +1281,7 @@ mod new_track_tests {
             split_y: 150.0,
             v_scroll: 0.0,
             a_scroll: 0.0,
+            panes: Default::default(),
         };
         assert_eq!(new_track_at(&seq, &layout, 10.0, 50.0, 50.0), Some((TrackKind::Video, Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 50.0)))));
         // scrolled to the bottom, V1..V3 fill the area as before

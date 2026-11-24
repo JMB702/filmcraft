@@ -24,6 +24,28 @@ pub struct Layout {
     /// before the next frame lays the rows out again (and clamps them).
     pub v_scroll: f32,
     pub a_scroll: f32,
+    /// Where the two track panes end and how far each scrolls (for drags that scroll them).
+    pub panes: Panes,
+}
+
+/// The outer edges of the track panes and their scroll ranges. The video pane runs from
+/// `video_top` (below the caption tracks) down to the divider, the audio pane from the divider
+/// down to `audio_bottom` (the top of the Mix row). All zero: no vertical auto-scroll.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Panes {
+    pub video_top: f32,
+    pub audio_bottom: f32,
+    pub max_v_scroll: f32,
+    pub max_a_scroll: f32,
+}
+
+/// How far inside a pane's edge a drag starts scrolling it, in points.
+pub const EDGE_BAND: f32 = 16.0;
+
+/// Points a second a drag scrolls the tracks with the pointer `d` points into an edge band
+/// (more than [`EDGE_BAND`] once it is past the edge): faster the farther it goes, up to a cap.
+pub fn edge_speed(d: f32) -> f32 {
+    if d.is_nan() || d <= 0.0 { 0.0 } else { (120.0 + 12.0 * d).min(2400.0) }
 }
 
 impl Layout {
@@ -55,6 +77,55 @@ impl Layout {
             }
         }
         r
+    }
+}
+
+impl Layout {
+    /// The rate (points a second) at which a drag with the pointer at `y` scrolls the video and
+    /// audio tracks, as `(v_scroll, a_scroll)` changes. Past the top of the video pane the video
+    /// tracks scroll up toward the highest track; past the bottom of the audio pane the audio
+    /// tracks scroll down toward the last one. Within [`EDGE_BAND`] of the divider, a drag that
+    /// began in that pane (`own`) scrolls it back toward V1 or A1. `cross`: the drag may reach
+    /// into the other pane (a marquee), so the other pane's outer edge scrolls it too; a clip
+    /// move stays on its own kind of track and scrolls only its own pane.
+    pub fn edge_scroll_rates(&self, y: f32, own: TrackKind, cross: bool) -> (f32, f32) {
+        let p = self.panes;
+        if !y.is_finite() || p.audio_bottom <= p.video_top {
+            return (0.0, 0.0);
+        }
+        let (mut dv, mut da) = (0.0, 0.0);
+        if own == TrackKind::Video || cross {
+            dv += edge_speed(p.video_top + EDGE_BAND - y);
+        }
+        if own == TrackKind::Audio || cross {
+            da += edge_speed(y - (p.audio_bottom - EDGE_BAND));
+        }
+        // the inner edges only within the band: past the divider the pointer is reaching into
+        // the other pane, not asking for more of this one
+        let audio_top = self.split_y + DIVIDER_H;
+        if own == TrackKind::Video && y < self.split_y {
+            dv -= edge_speed(y - (self.split_y - EDGE_BAND));
+        }
+        if own == TrackKind::Audio && y >= audio_top {
+            da -= edge_speed(audio_top + EDGE_BAND - y);
+        }
+        // nothing left to show that way: no scrolling (and no repaints asked for)
+        let stop = |rate: f32, at: f32, max: f32| if (rate > 0.0 && at >= max) || (rate < 0.0 && at <= 0.0) { 0.0 } else { rate };
+        (stop(dv, self.v_scroll, p.max_v_scroll), stop(da, self.a_scroll, p.max_a_scroll))
+    }
+
+    /// `y` held inside the outer edges of the pane of `kind`, so a clip dragged past the top of the
+    /// video tracks or the bottom of the audio tracks still lands on the edge track while they scroll.
+    pub fn y_in_pane(&self, kind: TrackKind, y: f32) -> f32 {
+        let p = self.panes;
+        if p.audio_bottom <= p.video_top {
+            return y;
+        }
+        match kind {
+            TrackKind::Video if y < p.video_top => p.video_top,
+            TrackKind::Audio if y >= p.audio_bottom => p.audio_bottom - 0.5,
+            _ => y,
+        }
     }
 }
 
