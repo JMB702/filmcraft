@@ -106,6 +106,35 @@ pub enum PlanStep {
     Adjust {
         ops: Vec<FxOp>,
     },
+    /// A nested sequence or multi-camera clip that is moved, scaled, faded or has effects: its
+    /// own picture, then what the clip does to it.
+    Group(Box<Group>),
+}
+
+/// A nested picture drawn as one: `layers` are composited onto an empty `width`×`height` canvas of
+/// their own (the nested sequence rendered at the size the CPU renders it for this clip), `ops`
+/// (the clip's standard effects) run on that canvas, and the result is placed on the frame with
+/// `matrix` at `opacity`, in Normal mode. This is what [`crate::item_layer`] does on the CPU, step
+/// for step, so the picture is the same.
+///
+/// Such a clip used to be rendered on the CPU as one float image and handed to the GPU: 23 ms a
+/// frame job for a 4K multi-camera punch-in, 160 ms with Tint and Noise on it.
+#[derive(Clone)]
+pub struct Group {
+    pub width: usize,
+    pub height: usize,
+    pub layers: Vec<PlanLayer>,
+    pub ops: Vec<FxOp>,
+    /// Maps canvas pixels to output pixels.
+    pub matrix: Affine,
+    pub opacity: f32,
+}
+
+impl Group {
+    /// Whether the canvas is the frame as it is (same size, not moved): no resampling, as on the CPU.
+    pub fn in_place(&self, width: usize, height: usize) -> bool {
+        (self.width, self.height) == (width, height) && crate::identity_placement(&self.matrix)
+    }
 }
 
 /// What the device that composites a plan can run. [`plan_frame`] plans a frame with a step the
@@ -118,17 +147,27 @@ pub struct DeviceCaps {
     /// Largest output side whose adjustment layers ([`PlanStep::Adjust`]) the device runs: its
     /// texture limit with an effect stage, 0 without one.
     pub adjust_side: u32,
+    /// Largest side of a nested picture the device draws as a [`PlanStep::Group`]: its texture
+    /// limit, 0 for a device that does not draw groups (the clip is then rendered on the CPU).
+    pub group_side: u32,
 }
 
 impl DeviceCaps {
-    /// A device without an effect stage: a frame with an adjustment layer plans on the CPU.
-    pub const NONE: Self = Self { adjust_side: 0 };
+    /// A device without an effect stage: a frame with an adjustment layer plans on the CPU, and
+    /// so does a nested clip that is transformed or has effects.
+    pub const NONE: Self = Self { adjust_side: 0, group_side: 0 };
     /// A device that runs every step ([`execute_cpu`] does).
-    pub const ALL: Self = Self { adjust_side: u32::MAX };
+    pub const ALL: Self = Self { adjust_side: u32::MAX, group_side: u32::MAX };
 
     /// Whether the device runs the adjustment layers of a `w`×`h` frame.
     pub fn adjusts(self, w: usize, h: usize) -> bool {
         w.max(h) <= self.adjust_side as usize
+    }
+
+    /// Whether the device draws a `w`×`h` nested picture as a group, running `ops` effects on it
+    /// (effects need its effect stage, as adjustment layers do).
+    pub fn groups(self, w: usize, h: usize, ops: usize) -> bool {
+        w.max(h) <= self.group_side as usize && (ops == 0 || self.adjusts(w, h))
     }
 }
 
@@ -181,6 +220,7 @@ impl PlanStack {
                 PlanStep::Layers(layers) => layers.len(),
                 PlanStep::Transition { inputs, .. } => inputs.iter().map(Vec::len).sum(),
                 PlanStep::Adjust { .. } => 0,
+                PlanStep::Group(g) => g.layers.len(),
             })
             .sum();
         self.layers = self.layers.saturating_sub(count);
@@ -193,6 +233,7 @@ impl PlanStack {
                 PlanStep::Layers(layers) => layers.into_iter().for_each(|l| self.push(l)),
                 PlanStep::Transition { inputs, effect, progress, scale } => self.push_transition(inputs, effect, progress, scale),
                 PlanStep::Adjust { ops } => self.push_adjust(ops),
+                PlanStep::Group(g) => self.push_group(*g),
             }
         }
     }
@@ -228,6 +269,15 @@ impl PlanStack {
             return;
         }
         self.steps.push(PlanStep::Adjust { ops });
+    }
+
+    fn push_group(&mut self, group: Group) {
+        if self.exhausted || self.layer_count().saturating_add(group.layers.len()) > MAX_PLAN_LAYERS {
+            self.exhausted = true;
+            return;
+        }
+        self.layers = self.layers.saturating_add(group.layers.len());
+        self.steps.push(PlanStep::Group(Box::new(group)));
     }
 
     fn into_layers(self, width: usize, height: usize) -> Option<Vec<PlanLayer>> {
@@ -266,6 +316,7 @@ impl FramePlan {
                     PlanStep::Layers(ls) => layers(ls),
                     PlanStep::Transition { inputs, .. } => inputs.iter().map(|ls| layers(ls)).sum(),
                     PlanStep::Adjust { .. } => 0,
+                    PlanStep::Group(g) => layers(&g.layers),
                 })
                 .sum(),
         }
@@ -283,6 +334,7 @@ impl FramePlan {
                     PlanStep::Layers(ls) => layer_side(ls),
                     PlanStep::Transition { inputs, .. } => inputs.iter().map(|ls| layer_side(ls)).max().unwrap_or(0),
                     PlanStep::Adjust { .. } => 0,
+                    PlanStep::Group(g) => layer_side(&g.layers).max(g.width).max(g.height),
                 })
                 .fold((*width).max(*height), usize::max),
         }
@@ -649,6 +701,15 @@ fn push_item(sc: Scene, item: &TrackItem, extra_opacity: f32, blend: Option<Blen
         }
         return;
     }
+    // A nested sequence or multi-camera clip that the two cases above leave (moved, scaled,
+    // faded, with effects, another size): its picture as a group the compositor draws.
+    if let Some(ItemKind::Sequence(nested)) = project.item(item.item).map(|p| &p.kind)
+        && nest < crate::MAX_NEST_DEPTH
+        && bl == Blend::Normal
+        && push_group(sc, item, nested, op * extra_opacity, out).is_some()
+    {
+        return;
+    }
     // Graphic clips without standard effects: the layers are rasterised (cached) into one tight
     // image the GPU places as a layer.
     if !(opts.effects && item.has_standard_effects() || item.has_opacity_masks())
@@ -750,6 +811,113 @@ fn opaque(frame: &VideoFrame, opacity: f32, blend: Blend) -> bool {
     blend == Blend::Normal && opacity >= 1.0 && crate::occlusion::frame_is_opaque(frame)
 }
 
+/// Plan the nested sequence (or multi-camera angle) of `item` as a [`PlanStep::Group`] drawn at
+/// `opacity`. None when the device does not draw it or the CPU renderer does something a group
+/// does not (an effect without a GPU version, a mask, a nested sequence in another colour
+/// pipeline, an adjustment layer or a transition the compositor cannot mix inside it): nothing is
+/// pushed then, and the clip is rendered on the CPU as before.
+fn push_group(sc: Scene, item: &TrackItem, nested: &Sequence, opacity: f32, out: &mut PlanStack) -> Option<()> {
+    let Scene { project, seq, t, opts, caps, nest, .. } = sc;
+    if item.has_opacity_masks() || nested.settings.color != seq.settings.color {
+        return None;
+    }
+    let (ft, mt) = (item.source_time_at(t), item.effect_time_at(t));
+    // the size the CPU renders the nested sequence at for this clip (`item_layer_ex`, `base_layer`)
+    let size = (nested.settings.width, nested.settings.height);
+    let motion = motion_matrix(seq, item, size, Some(nested.settings.par), mt);
+    let lin = ((motion.a * motion.a + motion.b * motion.b).sqrt()).max((motion.c * motion.c + motion.d * motion.d).sqrt());
+    let want = (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32;
+    let (gw, gh) = output_size(nested, want);
+    // the clip's effects, evaluated for that picture: every one unmasked and run by the GPU
+    let standard = |e: &&filmcraft_project::EffectInstance| e.enabled && e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e);
+    let px_scale = gw as f32 / size.0.max(1) as f32;
+    let ops: Vec<FxOp> = if opts.effects {
+        let cx = crate::effects::FxCtx {
+            t: mt,
+            px_scale: px_scale.min(crate::MAX_EFFECT_PX_SCALE),
+            mask_scale: px_scale,
+            seconds: (t - item.start).seconds(),
+            timecode: "",
+            clip_name: &item.name,
+            project: Some(project),
+            env: None,
+            frame_rate: seq.settings.frame_rate.as_f64(),
+            working: seq.settings.color.working,
+        };
+        item.effects
+            .iter()
+            .filter(standard)
+            .map(|e| {
+                let gpu = e.masks.iter().all(|m| m.mode == filmcraft_project::MaskMode::None) && crate::gpufx::GPU_EFFECTS.contains(&e.effect.as_str());
+                if gpu { FxOp::eval(e, &cx, gw, gh).filter(FxOp::gpu_ok) } else { None }
+            })
+            .collect::<Option<_>>()?
+    } else {
+        Vec::new()
+    };
+    if !caps.groups(gw, gh, ops.len()) {
+        return None;
+    }
+    // The picture is rendered at the size it is shown at, so placing it reduces it by 2 or more
+    // only when it is squeezed along one axis to under half the other. The CPU then halves the
+    // whole image first (`Image::transformed`), which no single sample of the compositor gives.
+    let matrix =
+        Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion).then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
+    let across = (matrix.a * matrix.a + matrix.b * matrix.b).sqrt().min((matrix.c * matrix.c + matrix.d * matrix.d).sqrt());
+    if across.is_nan() || across <= 0.5 {
+        return None;
+    }
+    // the nested picture's own layers, at the scale it is rendered at
+    let inner = Scene { seq: nested, t: ft, opts: RenderOptions { scale: want, captions: false, ..opts }, nest: nest + 1, ..sc };
+    let mut sub = PlanStack::default();
+    match item.multicam_angle(nested) {
+        // a multi-camera clip: its angle's clip alone, on an empty canvas (where every blend mode
+        // but Dissolve is Normal)
+        Some(angle) => {
+            if let Some(tr) = nested.angle_video_track_index(angle).and_then(|i| nested.video_tracks.get(i)) {
+                if tr.transitions.iter().any(|x| x.range().contains(ft)) {
+                    return None;
+                }
+                if let Some(clip) = tr.item_at(ft).filter(|i| i.enabled) {
+                    if is_adjustment(project, clip) || crate::opacity_blend(clip, clip.effect_time_at(ft)).1 == Blend::Dissolve {
+                        return None;
+                    }
+                    push_item(inner, clip, 1.0, Some(Blend::Normal), &mut sub);
+                }
+            }
+        }
+        None => {
+            let adjusted = |tr: &filmcraft_project::Track| tr.enabled && tr.item_at(ft).is_some_and(|i| i.enabled && is_adjustment(project, i));
+            let mixed =
+                |tr: &filmcraft_project::Track| tr.enabled && tr.transitions.iter().any(|x| x.range().contains(ft) && !simple_transition(&x.effect.effect));
+            if !layered_at(project, nested, ft, want, caps) || nested.video_tracks.iter().any(|tr| adjusted(tr) || mixed(tr)) {
+                return None;
+            }
+            push_tracks(inner, &mut sub);
+            // a nested sequence's captions are part of its picture
+            for o in crate::caption_overlays(nested, ft, gw, gh) {
+                sub.push(PlanLayer::new(
+                    Arc::new(VideoFrame::rgba_f32(o.w as u32, o.h as u32, o.px)),
+                    Affine::translate(o.x as f64, o.y as f64),
+                    1.0,
+                    Blend::Normal,
+                ));
+            }
+        }
+    }
+    let covered = sub.solid;
+    let layers = sub.into_layers(gw, gh)?;
+    let (ow, oh) = output_size(seq, opts.scale);
+    let group = Group { width: gw, height: gh, layers, ops, matrix, opacity };
+    // (a placed canvas is transparent from half a pixel inside its edge: it covers the frame when
+    // it is the frame, or when every pixel samples further inside than that)
+    let fills = group.in_place(ow, oh) || crate::occlusion::covers_within((gw as u32, gh as u32), &matrix, ow, oh, 0.5 + 1e-6);
+    let solid = covered && opacity >= 1.0 && group.ops.iter().all(FxOp::keeps_alpha) && fills;
+    out.push_group(group);
+    out.solid |= solid;
+    Some(())
+}
+
 /// Maps a `w`×`h` frame's pixels to the frame turned clockwise by `q` quarter turns, as
 /// [`VideoFrame::rotated`] turns it.
 pub fn quarter_turns(q: u8, w: f64, h: f64) -> Affine {
@@ -802,6 +970,15 @@ pub fn execute_cpu(plan: &FramePlan) -> crate::Image {
                         for op in ops {
                             op.apply(&mut canvas);
                         }
+                    }
+                    PlanStep::Group(g) => {
+                        let mut nested = crate::Image::new(g.width, g.height);
+                        execute_layers(&mut nested, &g.layers);
+                        for op in &g.ops {
+                            op.apply(&mut nested);
+                        }
+                        let placed = if g.in_place(*width, *height) { nested } else { nested.transformed(*width, *height, &g.matrix) };
+                        crate::blend::composite(&mut canvas, &placed, g.opacity, Blend::Normal);
                     }
                 }
             }

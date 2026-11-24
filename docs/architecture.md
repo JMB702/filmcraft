@@ -209,6 +209,9 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
           │
           └─ render::plan::plan_frame → gpu::GpuCompositor     GPU path
                layers = decoded YUV/RGBA frames + matrix + opacity + blend mode;
+               a nested or multicam clip with Motion or effects = a group (its layers
+               on a canvas of their own, the clip's effects, then its placement);
+               tracks hidden under a full-frame opaque clip are left out;
                anything the shaders don't cover is pre-rendered on the CPU
           ▼
         ui-egui frames.rs worker pool ──► monitors (program/source), thumbnails, prefetch

@@ -89,6 +89,36 @@ pub(crate) fn noise_frame_seed(cx: &FxCtx) -> u64 {
     cx.t.0 as u64
 }
 
+/// The Noise effect: `amt` of noise added to each pixel's encoded colour, one value for the three
+/// channels or (`colored`) one each, from the pixel's place and the frame's `seed`. Alpha is left
+/// alone. [`crate::gpufx::FxOp::Noise`] runs the same on the GPU.
+pub(crate) fn noise(img: &mut Image, amt: f32, colored: bool, clip: bool, seed: u64) {
+    let w = img.w;
+    if w == 0 {
+        return;
+    }
+    img.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let p = &mut row[x * 4..x * 4 + 4];
+            let a = p[3];
+            if a <= 0.0 {
+                continue;
+            }
+            let n0 = hash3(x, y, seed) - 0.5;
+            let ns = if colored { [n0, hash3(x, y, seed.wrapping_add(7777)) - 0.5, hash3(x, y, seed.wrapping_add(99_991)) - 0.5] } else { [n0; 3] };
+            let c = enc([p[0] / a, p[1] / a, p[2] / a]);
+            let mut o = [c[0] + ns[0] * amt, c[1] + ns[1] * amt, c[2] + ns[2] * amt];
+            if clip {
+                o = o.map(|v| v.clamp(0.0, 1.0));
+            }
+            let o = dec(o);
+            p[0] = o[0] * a;
+            p[1] = o[1] * a;
+            p[2] = o[2] * a;
+        }
+    });
+}
+
 pub(crate) fn hash3(x: usize, y: usize, z: u64) -> f32 {
     let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ z.wrapping_mul(0x1656_67B1_9E37_79F9);
     h ^= h >> 31;
@@ -135,33 +165,7 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
                 median(img, r);
             }
         }
-        "noise" => {
-            let amt = f(e, "amount", cx) / 100.0;
-            let colored = b(e, "color");
-            let clip = b(e, "clip");
-            let frame = noise_frame_seed(cx);
-            let w = img.w;
-            img.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
-                for x in 0..w {
-                    let p = &mut row[x * 4..x * 4 + 4];
-                    let a = p[3];
-                    if a <= 0.0 {
-                        continue;
-                    }
-                    let n0 = hash3(x, y, frame) - 0.5;
-                    let ns = if colored { [n0, hash3(x, y, frame + 7777) - 0.5, hash3(x, y, frame + 99_991) - 0.5] } else { [n0; 3] };
-                    let c = enc([p[0] / a, p[1] / a, p[2] / a]);
-                    let mut o = [c[0] + ns[0] * amt, c[1] + ns[1] * amt, c[2] + ns[2] * amt];
-                    if clip {
-                        o = o.map(|v| v.clamp(0.0, 1.0));
-                    }
-                    let o = dec(o);
-                    p[0] = o[0] * a;
-                    p[1] = o[1] * a;
-                    p[2] = o[2] * a;
-                }
-            });
-        }
+        "noise" => noise(img, f(e, "amount", cx) / 100.0, b(e, "color"), b(e, "clip"), noise_frame_seed(cx)),
         "mosaic" => {
             let bx = f(e, "horizontal", cx).max(1.0) as usize;
             let by = f(e, "vertical", cx).max(1.0) as usize;

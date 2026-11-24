@@ -321,7 +321,8 @@ fn a_plain_nest_is_planned_as_its_own_layers_and_looks_the_same() {
 #[test]
 fn a_nest_that_is_not_plain_is_still_drawn_right() {
     let t = FrameRate::FPS_24.tick_of(20);
-    // each of these keeps the nest one layer (rendered on the CPU), and the plan matches the reference
+    // each of these keeps the nest one picture (a group: its layers on a canvas of their own, then
+    // the clip's effects and placement), and the plan matches the reference
     let cases: [(&str, fn(&mut Rig, ItemId, ItemId, ClipId)); 5] = [
         ("half-transparent nest", |r, _, outer, nest| {
             r.clip(outer, nest).effect_mut("opacity").unwrap().params.get_mut("opacity").unwrap().value = ParamValue::Float(50.0);
@@ -355,17 +356,13 @@ fn a_nest_that_is_not_plain_is_still_drawn_right() {
         s.video_tracks[0].items.push(below);
         s.video_tracks[1].items.push(nest_clip);
         change(&mut r, inner, outer, nest);
-        // every track drawn (the nest's own picture can cover the matte, which is then left out:
-        // `occlusion`), so that the count says how the nest itself was planned
+        // every track drawn (a nest whose picture covers the frame hides the matte, which is then
+        // left out: `occlusion`), so that the shape says how the nest itself was planned
         let all = RenderOptions { occlusion: false, ..Default::default() };
-        let layers = match plan::plan_frame(&r.p, outer, t, all, plan::DeviceCaps::ALL, &r.map) {
-            plan::FramePlan::Layers { layers, .. } => Some(layers.len()),
-            _ => None,
-        };
-        assert_eq!(layers, Some(2), "{what}: the matte and one image of the nest");
-        // a nest whose picture stays opaque over the whole frame hides the matte under it
-        let hidden = matches!(what, "a blend mode inside the nest");
-        assert_eq!(layer_count(&r, outer, t), Some(if hidden { 1 } else { 2 }), "{what}: with hidden tracks left out");
+        assert_eq!(plan_shape(&r, outer, t, all), Some((1, 1)), "{what}: the matte and the nest as one group");
+        // a device that draws no groups gets the nest as one image rendered on the CPU
+        let none = plan::plan_frame(&r.p, outer, t, all, plan::DeviceCaps::NONE, &r.map);
+        assert!(matches!(&none, plan::FramePlan::Layers { layers, .. } if layers.len() == 2), "{what}: the matte and one image of the nest");
         let w = worst(&r.planned(outer, t), &r.frame(outer, t));
         assert!(w < 0.01, "{what}: plan and reference differ by {w}");
     }
@@ -440,4 +437,81 @@ fn a_wrong_stored_media_width_does_not_blow_up_effect_sizes() {
     let t = std::time::Instant::now();
     let _ = r.frame(s, Tick::ZERO);
     assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+}
+
+/// How the plan of `seq` at `t` draws: (layer steps, groups), None for one CPU image.
+fn plan_shape(r: &Rig, seq: ItemId, t: Tick, opts: RenderOptions) -> Option<(usize, usize)> {
+    match plan::plan_frame(&r.p, seq, t, opts, plan::DeviceCaps::ALL, &r.map) {
+        plan::FramePlan::Layers { layers, .. } => Some((layers.len(), 0)),
+        plan::FramePlan::Composite { steps, .. } => Some((
+            steps.iter().map(|s| if let plan::PlanStep::Layers(l) = s { l.len() } else { 0 }).sum(),
+            steps.iter().filter(|s| matches!(s, plan::PlanStep::Group(_))).count(),
+        )),
+        plan::FramePlan::Image(_) => None,
+    }
+}
+
+/// A nested sequence or multi-camera clip that is scaled, moved, turned, faded or has effects is
+/// planned as a group (its own picture, the clip's effects, then its placement) and the plan is
+/// the picture the CPU renderer makes, at full and at reduced resolution. It used to be rendered
+/// on the CPU as one image: 23 ms a frame job for a 4K multi-camera punch-in, 160 ms with Tint
+/// and Noise.
+#[test]
+fn transformed_and_graded_nests_are_groups_and_match_the_reference() {
+    let t = FrameRate::FPS_24.tick_of(20);
+    type Change = fn(&mut TrackItem);
+    let cases: [(&str, Change); 6] = [
+        ("punch-in", |c| c.effect_mut("motion").unwrap().param_mut("scale").unwrap().value = ParamValue::Float(125.0)),
+        ("shrunk and turned", |c| {
+            let m = c.effect_mut("motion").unwrap();
+            m.param_mut("scale").unwrap().value = ParamValue::Float(60.0);
+            m.param_mut("rotation").unwrap().value = ParamValue::Float(12.0);
+        }),
+        ("half transparent", |c| c.effect_mut("opacity").unwrap().param_mut("opacity").unwrap().value = ParamValue::Float(50.0)),
+        ("tint and noise", |c| {
+            for (id, k, v) in [("tint", "amount", 100.0), ("noise", "amount", 6.0)] {
+                let mut e = filmcraft_project::effect::find_effect(id).unwrap().instance();
+                e.params.get_mut(k).unwrap().value = ParamValue::Float(v);
+                c.effects.push(e);
+            }
+        }),
+        ("lumetri on a punch-in", |c| {
+            c.effect_mut("motion").unwrap().param_mut("scale").unwrap().value = ParamValue::Float(150.0);
+            let mut e = filmcraft_project::effect::find_effect("lumetri").unwrap().instance();
+            e.params.get_mut("contrast").unwrap().value = ParamValue::Float(20.0);
+            e.params.get_mut("exposure").unwrap().value = ParamValue::Float(-0.3);
+            c.effects.push(e);
+        }),
+        ("an effect the GPU has no version of", |c| {
+            let mut e = filmcraft_project::effect::find_effect("median").unwrap().instance();
+            e.params.get_mut("radius").unwrap().value = ParamValue::Float(1.0);
+            c.effects.push(e);
+        }),
+    ];
+    for multicam in [false, true] {
+        for (what, change) in cases {
+            let mut r = Rig::new();
+            let (_, outer, nest) = two_layer_nest(&mut r);
+            if multicam {
+                // the ocean's track alone
+                r.clip(outer, nest).multicam = Some(filmcraft_project::MulticamSel { enabled: true, angle: 0 });
+            }
+            change(r.clip(outer, nest));
+            for preview in [1.0, 0.5] {
+                let opts = RenderOptions { scale: preview, ..Default::default() };
+                let shape = plan_shape(&r, outer, t, opts);
+                // one CPU image for an effect the GPU cannot run; and a multi-camera clip that is
+                // only faded is its angle's clip drawn at that opacity, no group needed
+                let one_layer = what.starts_with("an effect the GPU") || (multicam && what == "half transparent");
+                assert_eq!(shape, Some(if one_layer { (1, 0) } else { (0, 1) }), "{what}, multicam {multicam}, preview {preview}");
+                let reference = render_sequence(&r.p, outer, t, opts, &r.map);
+                let planned = plan::execute_cpu(&plan::plan_frame(&r.p, outer, t, opts, plan::DeviceCaps::ALL, &r.map));
+                let difference = worst(&planned, &reference);
+                assert!(difference < 0.001, "{what}, multicam {multicam}, preview {preview}: {difference}");
+            }
+            // a device that draws no groups gets the clip as one CPU image, as before
+            let none = plan::plan_frame(&r.p, outer, t, RenderOptions::default(), plan::DeviceCaps::NONE, &r.map);
+            assert!(matches!(&none, plan::FramePlan::Layers { layers, .. } if layers.len() == 1), "{what}: no groups without the device");
+        }
+    }
 }

@@ -133,6 +133,7 @@ fn plan_layer_count(plan: &filmcraft_render::plan::FramePlan) -> usize {
                 PlanStep::Layers(l) => l.len(),
                 PlanStep::Transition { inputs, .. } => inputs.iter().map(Vec::len).sum(),
                 PlanStep::Adjust { .. } => 0,
+                PlanStep::Group(g) => g.layers.len(),
             })
             .sum(),
     }

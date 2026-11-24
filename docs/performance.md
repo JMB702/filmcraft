@@ -100,8 +100,9 @@ builds. Frames shown of the frames due; CPU cores the play needed at the sequenc
 | `nest-pip-hevc10-2160-3` (nest under a picture-in-picture) | 113 / 180 → **180** / 180 | 4.82 → **0.63** |
 | `gfx-h264-2160-2` (ProRes 4444 title over a clip) | 106 / 180 → **180** / 180 | 9.95 → **1.85** |
 | `samefile-h264-2160-2` (one file at two places) | 16 / 180 → **179** / 180 | 0.63 → 0.40 |
-| `mcam-punch-h264-2160-2` (multicam clip at 125 %) | 173 / 180 → 180 / 180 | 8.56 → 4.98 |
-| `mcam-fx-h264-2160-2` (multicam clip with Tint + Noise) | 113 / 180 → 172 / 180 | 10.86 → 11.23 |
+| `mcam-punch-h264-2160-2` (multicam clip at 125 %) | 173 / 180 → **180** / 180 | 8.56 → **0.19** |
+| `mcam-fx-h264-2160-2` (multicam clip with Tint + Noise) | 113 / 180 → **180** / 180 | 10.86 → **0.26** |
+| `edit-h264-2160-1` (multicam clips, tinted B-roll, a title, a punch-in) | not measured → 180 / 180 | not measured → 0.52 |
 
 What changed:
 
@@ -120,9 +121,17 @@ What changed:
 4. **A decoder per place of a file.** Two clips of one file showing at once made its one decoder
    seek for every frame (90 restarts in 6 s); each place now keeps its own.
 
-Still on the CPU: a multicam or nested clip with Motion or effects is rendered there as one
-picture (`mcam-punch`, `mcam-fx`). A multicam punch-in holds the frame rate at 5 cores; Tint +
-Noise on a 4K multicam clip does not quite (Noise has no GPU version).
+5. **Nested and multicam clips with Motion or effects are drawn by the GPU**
+   (`PlanStep::Group`). Such a clip was rendered on the CPU as one float picture and handed over
+   (23 ms a frame job for a 4K multicam punch-in, 160 ms with Tint and Noise). Its nested picture
+   is now composited on a canvas of its own at the size the CPU renders it, the clip's effects
+   run there, and the result is placed on the frame: the steps of the CPU renderer, so the
+   picture is the same (the export tests compare the two). Noise has a GPU version.
+
+A nested or multicam clip is still rendered on the CPU when one of its effects has no GPU
+version, when it or an effect has a mask, when the nested sequence is in another colour
+pipeline or holds an adjustment layer or a transition other than a dissolve or dip, and when
+it is squeezed along one axis to under half the other.
 
 ## Results (VideoToolbox export takes the RGBA pictures as they are, #3030, before → after)
 

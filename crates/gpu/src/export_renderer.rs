@@ -319,7 +319,8 @@ mod tests {
             assert_eq!((r.compositor.gpu_adjustments, r.compositor.cpu_adjustments), (1, 0));
         }
         r.compositor.fx = None;
-        assert_eq!(r.caps(), DeviceCaps::NONE);
+        // (nested pictures are still drawn as groups, without effects: only the effect stage is gone)
+        assert_eq!(r.caps().adjust_side, 0);
         assert!(filmcraft_render::plan::is_cpu_frame(&p, seq, t, opts, r.caps()), "no effect stage: the export renders the frame without this renderer");
         let counts = (r.compositor.gpu_adjustments, r.compositor.cpu_adjustments);
         // asked anyway, it hands back the CPU renderer's picture, planned as one image
@@ -617,6 +618,69 @@ mod tests {
         let gpu = r.render(&p, seq, t, RenderOptions::default(), &m).expect("GPU rendered the frame");
         assert!(cpu.px.as_chunks::<4>().0.iter().any(|pixel| pixel[..3].iter().any(|x| *x > 0.1)), "transformed fixture must contain a visible picture");
         assert_parity(&cpu, &gpu, "transformed");
+    }
+
+    /// An export through the GPU gives the CPU renderer's picture for nested and multi-camera
+    /// clips that are punched in or graded (drawn as groups: the nested picture on its own
+    /// canvas, the clip's effects there, then its placement), at several frames per case: the
+    /// effects edits use on such clips (Tint, Noise, Lumetri Color, Brightness & Contrast), alone
+    /// and on a punch-in.
+    #[test]
+    fn punched_in_and_graded_nests_export_like_the_cpu() {
+        let Some(mut renderer) = ExportRenderer::new() else {
+            eprintln!("SKIPPED (group GPU parity): no adapter");
+            return;
+        };
+        if renderer.compositor.fx.is_none() {
+            eprintln!("SKIPPED (group GPU parity): no effect stage");
+            return;
+        }
+        type Fx = &'static [(&'static str, &'static [(&'static str, f64)])];
+        let cases: [(&str, f64, Fx); 7] = [
+            ("punch-in", 125.0, &[]),
+            ("tint", 100.0, &[("tint", &[("amount", 100.0)])]),
+            ("noise", 100.0, &[("noise", &[("amount", 6.0)])]),
+            ("tint + noise", 100.0, &[("tint", &[("amount", 100.0)]), ("noise", &[("amount", 6.0)])]),
+            ("lumetri", 100.0, &[("lumetri", &[("contrast", 20.0), ("exposure", -0.3)])]),
+            ("brightness & contrast on a punch-in", 150.0, &[("brightness_contrast", &[("brightness", 10.0), ("contrast", 15.0)])]),
+            ("tint + noise on a punch-in", 118.0, &[("tint", &[("amount", 100.0)]), ("noise", &[("amount", 6.0)])]),
+        ];
+        let rate = filmcraft_time::FrameRate::FPS_24;
+        for multicam in [false, true] {
+            for (what, scale, effects) in cases {
+                let (mut p, inner, mut sources) = project(false);
+                let project = Arc::make_mut(&mut p);
+                let media = *sources.0.iter().find(|(_, s)| s.info().has_video()).unwrap().0;
+                let source = GeneratorSource::new(Generator::Demo(filmcraft_media::DemoScene::OceanSunset), 320, 180, rate, Tick(2 * TICKS_PER_SECOND));
+                let ItemKind::Media(clip) = &mut project.item_mut(media).unwrap().kind else { panic!("expected generated media") };
+                clip.info = source.info().clone();
+                clip.media = MediaRef::Generator(source.generator.clone());
+                sources.0.insert(media, Arc::new(source));
+                let outer = project.new_sequence("outer", project.sequence(inner).unwrap().settings.clone(), 1, 0, None);
+                let mut nest = project.make_track_item(inner, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, rate.tick_of(24)), rate).unwrap();
+                if multicam {
+                    nest.multicam = Some(filmcraft_project::MulticamSel { enabled: true, angle: 0 });
+                }
+                nest.effect_mut("motion").unwrap().param_mut("scale").unwrap().value = filmcraft_project::ParamValue::Float(scale);
+                for (id, params) in effects {
+                    let mut e = filmcraft_project::find_effect(id).unwrap().instance();
+                    for (k, v) in *params {
+                        e.param_mut(k).unwrap().value = filmcraft_project::ParamValue::Float(*v);
+                    }
+                    nest.effects.push(e);
+                }
+                project.sequence_mut(outer).unwrap().video_tracks[0].items.push(nest);
+                let before = renderer.compositor.gpu_groups;
+                for frame in [0, 7, 19] {
+                    let (t, opts) = (rate.tick_of(frame), RenderOptions::default());
+                    let cpu = filmcraft_render::render_sequence(&p, outer, t, opts, &sources);
+                    let gpu = renderer.render(&p, outer, t, opts, &sources).expect("GPU rendered the frame");
+                    assert_parity(&cpu, &gpu, &format!("{what}, multicam {multicam}, frame {frame}"));
+                }
+                assert_eq!(renderer.compositor.gpu_groups - before, 3, "{what}, multicam {multicam}: drawn as a group on the GPU, every frame");
+                assert_eq!(renderer.compositor.cpu_groups, 0);
+            }
+        }
     }
 
     #[test]

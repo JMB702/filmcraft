@@ -47,6 +47,15 @@ pub enum FxOp {
         white: [f32; 3],
         amount: f32,
     },
+    /// Noise: `amount` of noise on each pixel's encoded colour (one value, or one per channel
+    /// when `colored`), from the pixel's place in the working image and the frame's `seed`
+    /// ([`crate::effects::noise`]).
+    Noise {
+        amount: f32,
+        colored: bool,
+        clip: bool,
+        seed: u64,
+    },
     BlackWhite,
     ColorBalance {
         sh: [f32; 3],
@@ -223,6 +232,7 @@ pub enum FxOp {
 
 /// Effect ids [`FxOp::eval`] understands (the GPU-capable standard effects).
 pub const GPU_EFFECTS: &[&str] = &[
+    "noise",
     "brightness_contrast",
     "proc_amp",
     "tint",
@@ -307,6 +317,9 @@ impl FxOp {
             "tint" => {
                 let (bl, wh) = (color(e, "black", cx), color(e, "white", cx));
                 FxOp::Tint { black: [bl[0], bl[1], bl[2]], white: [wh[0], wh[1], wh[2]], amount: f(e, "amount", cx) / 100.0 }
+            }
+            "noise" => {
+                FxOp::Noise { amount: f(e, "amount", cx) / 100.0, colored: b(e, "color"), clip: b(e, "clip"), seed: crate::effects::noise_frame_seed(cx) }
             }
             "black_white" => FxOp::BlackWhite,
             "color_balance" => {
@@ -677,6 +690,7 @@ impl FxOp {
             FxOp::BrightnessContrast { br, co } => fin(&[*br, *co]),
             FxOp::ProcAmp { br, co, hue, sat } => fin(&[*br, *co, *hue, *sat]),
             FxOp::Tint { black, white, amount } => fin(black) && fin(white) && amount.is_finite(),
+            FxOp::Noise { amount, .. } => amount.is_finite(),
             FxOp::BlackWhite | FxOp::HFlip | FxOp::VFlip => true,
             FxOp::ColorBalance { sh, md, hi, .. } => fin(sh) && fin(md) && fin(hi),
             FxOp::ThreeWay { sh, md, hi, range, sat } => fin(sh) && fin(md) && fin(hi) && fin(range) && sat.is_finite(),
@@ -727,6 +741,7 @@ impl FxOp {
             FxOp::BrightnessContrast { .. }
                 | FxOp::ProcAmp { .. }
                 | FxOp::Tint { .. }
+                | FxOp::Noise { .. }
                 | FxOp::BlackWhite
                 | FxOp::ColorBalance { .. }
                 | FxOp::ThreeWay { .. }
@@ -777,6 +792,7 @@ impl FxOp {
                     dec([e[0] + (t[0] - e[0]) * amt, e[1] + (t[1] - e[1]) * amt, e[2] + (t[2] - e[2]) * amt])
                 });
             }
+            FxOp::Noise { amount, colored, clip, seed } => crate::effects::noise(img, *amount, *colored, *clip, *seed),
             FxOp::BlackWhite => img.map_rgb(|c, _, _| {
                 let l = luma709(c[0], c[1], c[2]);
                 [l, l, l]

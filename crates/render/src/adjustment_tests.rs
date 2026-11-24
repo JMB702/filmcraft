@@ -603,8 +603,8 @@ fn the_device_caps_decide_whether_an_adjustment_layer_is_a_step() {
         let side = w.max(h) as u32;
         let cases = [
             ("no effect stage", crate::plan::DeviceCaps::NONE, false),
-            ("a texture one pixel too small", crate::plan::DeviceCaps { adjust_side: side - 1 }, false),
-            ("a texture just large enough", crate::plan::DeviceCaps { adjust_side: side }, true),
+            ("a texture one pixel too small", crate::plan::DeviceCaps { adjust_side: side - 1, group_side: 0 }, false),
+            ("a texture just large enough", crate::plan::DeviceCaps { adjust_side: side, group_side: 0 }, true),
             ("every step", crate::plan::DeviceCaps::ALL, true),
         ];
         for (what, caps, step) in cases {

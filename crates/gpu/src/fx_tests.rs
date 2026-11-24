@@ -123,6 +123,10 @@ fn cases() -> Vec<(&'static str, Vec<(&'static str, ParamValue)>, bool)> {
         ("tint", vec![], false),
         ("tint", vec![("black", col(0.2, 0.1, 0.5)), ("white", col(1.0, 0.9, 0.3)), ("amount", fl(60.0))], false),
         ("black_white", vec![], false),
+        // the same pixel hash on the GPU: per-channel noise, one value for the three, unclipped
+        ("noise", vec![("amount", fl(6.0))], false),
+        ("noise", vec![("amount", fl(100.0)), ("color", ParamValue::Bool(false))], false),
+        ("noise", vec![("amount", fl(40.0)), ("clip", ParamValue::Bool(false))], false),
         ("color_balance", vec![("shadow_r", fl(50.0)), ("mid_g", fl(-40.0)), ("hi_b", fl(80.0)), ("shadow_b", fl(-100.0)), ("hi_r", fl(100.0))], false),
         ("color_balance", vec![("mid_r", fl(70.0)), ("hi_g", fl(-60.0)), ("preserve", ParamValue::Bool(true))], false),
         (
