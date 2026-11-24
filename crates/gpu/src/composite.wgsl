@@ -11,7 +11,7 @@ struct U {
     m0: vec4<f32>,   // a b c d
     m1: vec4<f32>,   // e f out_w out_h
     src: vec4<f32>,  // src_w src_h chroma_w chroma_h
-    p0: vec4<f32>,   // opacity, kind (0 rgba8 srgb straight, 1 rgba16f premul linear, 2 yuv), taps, transfer (0 srgb, 1 linear, 2 pq, 3 hlg)
+    p0: vec4<f32>,   // opacity, kind (0 rgba8 srgb straight, 1 rgba16f premul linear, 2 yuv, 3 yuv as two-byte codes), taps, transfer (0 srgb, 1 linear, 2 pq, 3 hlg)
     p1: vec4<f32>,   // y_off y_scale c_off c_scale (code units)
     p2: vec4<f32>,   // kr kb code_scale footprint
     p3: vec4<f32>,   // blend mode, alpha-plane scale (0: none), effect-source integer decimation, effect-source quarter turns
@@ -168,6 +168,33 @@ fn managed(rgb: vec3<f32>) -> vec3<f32> {
     return c;
 }
 
+// One texel of a Y'CbCr plane. Planes of more than 8 bits hold each code's two bytes (kind 3: low
+// byte in red, high byte in green), put back together here: the code itself, exact, where a
+// half-float texel could only hold 11 of its bits.
+fn tap(t: texture_2d<f32>, i: vec2<i32>) -> f32 {
+    let v = textureLoad(t, i, 0);
+    if u.p0.y > 2.5 {
+        return floor(v.r * 255.0 + 0.5) + floor(v.g * 255.0 + 0.5) * 256.0;
+    }
+    return v.r;
+}
+
+// `load4` for a plane: the same four texels and weights, each read with `tap`.
+fn load1(t: texture_2d<f32>, p: vec2<f32>) -> f32 {
+    let d = vec2<i32>(textureDimensions(t));
+    var q = p - 0.5;
+    let rq = round(q);
+    if abs(q.x - rq.x) < 1e-4 { q.x = rq.x; }
+    if abs(q.y - rq.y) < 1e-4 { q.y = rq.y; }
+    let i = vec2<i32>(floor(q));
+    let f = q - floor(q);
+    let a = tap(t, clamp(i, vec2(0), d - 1));
+    let b = tap(t, clamp(i + vec2(1, 0), vec2(0), d - 1));
+    let cc = tap(t, clamp(i + vec2(0, 1), vec2(0), d - 1));
+    let dd = tap(t, clamp(i + vec2(1, 1), vec2(0), d - 1));
+    return mix(mix(a, b, f.x), mix(cc, dd, f.x), f.y);
+}
+
 // One linear premultiplied sample at source position p.
 fn sample(p: vec2<f32>) -> vec4<f32> {
     let kind = u32(u.p0.y);
@@ -180,10 +207,10 @@ fn sample(p: vec2<f32>) -> vec4<f32> {
         return load4(tex0, p);
     }
     let cs = u.p2.z;
-    let yc = load4(tex0, p).r * cs;
+    let yc = load1(tex0, p) * cs;
     let cp = p * u.src.zw / u.src.xy;
-    let cb = load4(tex1, cp).r * cs;
-    let cr = load4(tex2, cp).r * cs;
+    let cb = load1(tex1, cp) * cs;
+    let cr = load1(tex2, cp) * cs;
     let y = (yc - u.p1.x) / u.p1.y;
     let b = (cb - u.p1.z) / u.p1.w;
     let r = (cr - u.p1.z) / u.p1.w;
@@ -194,7 +221,7 @@ fn sample(p: vec2<f32>) -> vec4<f32> {
     // straight alpha from the alpha plane (full resolution, like luma), premultiplied here
     var a = 1.0;
     if u.p3.y > 0.0 {
-        a = clamp(load4(tex3, p).r * u.p3.y, 0.0, 1.0);
+        a = clamp(load1(tex3, p) * u.p3.y, 0.0, 1.0);
     }
     var lin = to_linear(vec3(R, G, B));
     if u.q0.x > 0.5 { lin = managed(vec3(R, G, B)); }

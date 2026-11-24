@@ -308,6 +308,43 @@ fn prepared_upload_matches_inline_conversion() {
     }
 }
 
+/// Planes of more than 8 bits go to the GPU as they are, two bytes a texel, and the shader reads
+/// the code back from them. They used to be converted to half floats on the CPU first, for every
+/// layer of every frame, and the plan kept that copy: twice the memory (25 MB more per 4K 10-bit
+/// layer) and most of the CPU time of 10-bit playback.
+#[test]
+fn high_bit_depth_planes_upload_without_conversion() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let (w, h) = (256u32, 64u32);
+    for bits in [10u32, 12, 16] {
+        // every code of the bit depth's range shows up, with both of its bytes in use
+        let top = (1u32 << bits) - 1;
+        let luma: Vec<u16> = (0..w * h).map(|i| ((i * 2731 + 97) % (top + 1)) as u16).collect();
+        let chroma = |k: u32| -> Vec<u16> { (0..w * h).map(|i| ((i * k + 31) % (top + 1)) as u16).collect() };
+        let frame = Arc::new(VideoFrame {
+            width: w,
+            height: h,
+            data: PixelData::Yuv16 { planes: [Arc::new(luma), Arc::new(chroma(1543)), Arc::new(chroma(3989))], chroma: Chroma::C444, bits, alpha: None },
+            color: filmcraft_color::ColorInfo { range: Range::Full, ..filmcraft_color::ColorInfo::REC709 },
+            par: (1, 1),
+            pts: Default::default(),
+        });
+        let cpu = frame.to_rgba8();
+        let plan = FramePlan::Layers { width: w as usize, height: h as usize, layers: vec![PlanLayer::new(frame, Affine::IDENTITY, 1.0, Blend::Normal)] };
+        assert_eq!(prepare(&plan).bytes(), 0, "{bits}-bit planes need no converted copy");
+        let mut c = GpuCompositor::new(&dev, &q);
+        let before = c.uploaded_bytes;
+        c.composite(&plan);
+        assert_eq!(c.uploaded_bytes - before, u64::from(w * h) * 3 * 2, "{bits}-bit: the planes' own bytes are uploaded");
+        let (_, _, gpu) = c.read_output().expect("readback");
+        let error = cpu.iter().zip(&gpu).map(|(a, b)| a.abs_diff(*b)).max().expect("pixels");
+        assert!(error <= 1, "{bits}-bit: max error {error}");
+    }
+}
+
 /// The upload cache is keyed by pixel-buffer address, so it must keep the buffer alive: otherwise
 /// a new frame allocated at a freed frame's address is drawn with the stale texture (seen as
 /// whole frames from a previous composite in `crates/golden` GPU parity).
