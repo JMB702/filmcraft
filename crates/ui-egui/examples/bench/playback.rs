@@ -684,6 +684,11 @@ struct Args {
     repeat: usize,
     /// Settings ▸ Playback ▸ Hardware decoding: on (as the app) unless `--hw off`.
     hw: bool,
+    /// A project file to play instead of the scenarios, with the sequence's name and the places
+    /// (seconds from its start) to play from.
+    project: Option<String>,
+    sequence: Option<String>,
+    at: Vec<f64>,
 }
 
 fn parse_args() -> Args {
@@ -697,6 +702,9 @@ fn parse_args() -> Args {
         json: None,
         repeat: 1,
         hw: true,
+        project: None,
+        sequence: None,
+        at: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -711,6 +719,9 @@ fn parse_args() -> Args {
                 }
             }
             "--hw" => a.hw = it.next().as_deref() != Some("off"),
+            "--project" => a.project = it.next(),
+            "--sequence" => a.sequence = it.next(),
+            "--at" => a.at.extend(it.next().unwrap_or_default().split(',').filter_map(|v| v.parse::<f64>().ok())),
             "--res" => {
                 a.res = it
                     .next()
@@ -733,7 +744,8 @@ fn parse_args() -> Args {
             "--help" | "-h" => {
                 println!(
                     "bench_playback [--scenario h264-1080,stack3,stack3-blend,stack3-fx,h264-2160,hevc-2160,vp9-2160,av1-2160,demo,after-preview,seek-storm] [--res full,half] [--cpu|--gpu] [--hw auto|off] [--seconds 8] [--refresh 60] [--workers N] [--repeat N] [--json out.json]\n\
-                     layer scenarios: <shape>-<codec>-<res>-<n>, shape one of {}, codec h264|hevc10|hlg, res 1080|2160, n 1..4 (cover-hevc10-2160-2); `layers` runs the whole matrix",
+                     layer scenarios: <shape>-<codec>-<res>-<n>, shape one of {}, codec h264|hevc10|hlg, res 1080|2160, n 1..4 (cover-hevc10-2160-2); `layers` runs the whole matrix\n\
+                     a project: --project file.fcproj --sequence NAME --at 12.5,300 (plays --seconds from each place; the file is only read)",
                     crate::layers::SHAPES.join("|")
                 );
                 std::process::exit(0);
@@ -741,7 +753,7 @@ fn parse_args() -> Args {
             other => eprintln!("ignoring argument {other}"),
         }
     }
-    if a.scenarios.is_empty() {
+    if a.scenarios.is_empty() && a.project.is_none() {
         a.scenarios = ["h264-1080", "stack3", "stack3-blend", "stack3-fx", "h264-2160", "hevc-2160", "demo", "after-preview", "seek-storm"]
             .iter()
             .map(|s| s.to_string())
@@ -854,6 +866,39 @@ pub fn scenario_session(name: &str) -> Option<(Session, ItemId)> {
     Some((s, seq))
 }
 
+/// Play places of a sequence of a project file (`--project`): what a real edit costs. The
+/// project is opened as the app opens it and only read; nothing is saved.
+fn play_project(args: &Args, path: &str, out: &mut Vec<Value>) {
+    let mut s = Session::default();
+    if let Err(e) = s.execute("file.open", json!({ "path": path })) {
+        eprintln!("{path}: {e}");
+        return;
+    }
+    let wanted = args.sequence.as_deref();
+    let found = s.project.items.iter().find(|(_, i)| i.as_sequence().is_some() && wanted.is_none_or(|n| i.name == n)).map(|(id, _)| *id);
+    let Some(seq) = found.or(s.state.active_sequence) else {
+        eprintln!("{path}: no sequence {}", wanted.unwrap_or("at all"));
+        return;
+    };
+    let Some(q) = s.project.sequence(seq) else { return };
+    let fps = q.settings.frame_rate.as_f64();
+    let places = if args.at.is_empty() { vec![0.0] } else { args.at.clone() };
+    for (res_name, scale) in &args.res {
+        for at in &places {
+            // a fresh frame server per play: cold caches, as after a jump of the playhead
+            let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), args.workers);
+            server.set_profiling(true);
+            let bench = Bench { server, refresh_hz: args.refresh, seconds: args.seconds, draft: false };
+            let mut display = Display::new(args.gpu);
+            let path_name = if display.gpu.is_some() { "gpu" } else { "cpu" };
+            let start = q.settings.frame_rate.snap(Tick::from_seconds_f64(at.max(0.0)));
+            let r = bench.play(&s, seq, &mut display, *scale, start, &format!("project {res_name} @{at:.1}s"));
+            print_row(&r, fps);
+            out.push(to_json(&r, &format!("project@{at:.1}"), res_name, path_name));
+        }
+    }
+}
+
 /// `bench_playback` / `cargo xtask bench-playback`.
 pub fn cli_main() {
     let args = parse_args();
@@ -876,6 +921,9 @@ pub fn cli_main() {
     );
     print_header();
     let mut out = Vec::new();
+    if let Some(path) = &args.project {
+        play_project(&args, path, &mut out);
+    }
     for name in &args.scenarios {
         for (res_name, scale) in &args.res {
             if name == "seek-storm" && res_name != "full" && args.res.len() > 1 {

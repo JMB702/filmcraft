@@ -1183,3 +1183,64 @@ fn random_access_search_is_bounded_when_every_claimed_keyframe_is_not_one() {
     let r = filmcraft_media::cancel::with_cancel(&flag, || random_access_at_or_before(&s, 0, |_| Some(true)));
     assert!(matches!(r, Err(CodecError::Cancelled)));
 }
+
+/// Two clips of one file showing at once ask for two places in turn. With one decoder each
+/// request restarted it at a keyframe (90 seeks in six seconds of a 4K clip shown twice, 16 of 180
+/// frames in time); with a decoder per place both streams decode straight on.
+#[test]
+fn two_places_of_one_stream_play_without_seeking_for_every_frame() {
+    let s = samples(900, 30, 2, false);
+    let cache = GopCache::new(None);
+    // 200 frames from sample 10 and from sample 500, alternating: more than the cache holds
+    for k in 0..200usize {
+        for from in [10usize, 500] {
+            let i = from + k;
+            let f = cache.frame(&s, i as i64 * 1000).expect("frame");
+            assert_eq!(index_of(&f), i, "place {from}, frame {k}");
+        }
+    }
+    // one start for each place, where a single decoder restarted for every request
+    let seeks = s.resets.load(Ordering::Relaxed);
+    assert!(seeks <= 3, "{seeks} decoder restarts for two streams of 200 frames");
+    // no frame decoded twice: each stream runs from its keyframe to its last frame (plus the
+    // pictures the decoder holds back)
+    let decodes = s.decodes.load(Ordering::Relaxed);
+    assert!(decodes <= 2 * (200 + 30 + 2), "{decodes} samples decoded");
+    // both decoders are given up with the cache's others
+    let st = cache.shared.state.lock().unwrap();
+    assert!(st.decoder.is_some() && st.parked.is_some());
+    drop(st);
+    let pool = cache.shared.pool.clone();
+    assert_eq!(pool.decoders.load(Ordering::Relaxed), 2);
+    drop(cache);
+    assert_eq!(pool.decoders.load(Ordering::Relaxed), 0);
+}
+
+/// One place at a time keeps one decoder: a seek long after the last frame (the playhead was
+/// moved) restarts the decoder there is, as before.
+#[test]
+fn a_seek_after_a_pause_does_not_make_a_second_decoder() {
+    let s = samples(900, 30, 0, false);
+    let cache = GopCache::new(None);
+    cache.frame(&s, 10_000).expect("frame");
+    // as if the last decode was a while ago
+    cache.shared.state.lock().unwrap().decoded_at = Instant::now().checked_sub(Duration::from_secs(2));
+    assert_eq!(index_of(&cache.frame(&s, 500_000).expect("frame")), 500);
+    let st = cache.shared.state.lock().unwrap();
+    assert!(st.parked.is_none());
+    assert_eq!(cache.shared.pool.decoders.load(Ordering::Relaxed), 1);
+}
+
+/// A strip of thumbnails asks for many places of one clip at once; that is no second stream, and
+/// thumbnails keep to one small decoder.
+#[test]
+fn thumbnails_of_many_places_keep_one_decoder() {
+    let s = samples(900, 30, 0, false);
+    let cache = GopCache::new(None);
+    filmcraft_media::cancel::with_background(true, || {
+        for i in [10usize, 400, 100, 700] {
+            assert_eq!(index_of(&cache.frame(&s, i as i64 * 1000).expect("frame")), i);
+        }
+    });
+    assert!(cache.shared.state.lock().unwrap().parked.is_none());
+}

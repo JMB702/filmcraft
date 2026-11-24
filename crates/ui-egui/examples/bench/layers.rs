@@ -12,6 +12,7 @@
 //! | `nest-pip` | a plain nested sequence (`n - 1` layers) on V1 under a picture-in-picture clip on V2 |
 //! | `fx` | `pip` with Lumetri Color on V1 and Tint on the layers above |
 //! | `gfx` | `cover` of `n - 1` clips under a full-frame ProRes 4444 title with alpha |
+//! | `samefile` | one clip twice: full frame on V1, and from 4 s later in the same file at 50 % on V2 (two places of one file at once) |
 //! | `edit` | an edit as the footage-sync skill lays it out: multicam clips of a two-camera nest (a 1080p camera scaled up, the main camera) on V1, a tinted B-roll clip of it on V2, a title on V3 and a punch-in |
 //!
 //! `codec` is `h264`, `hevc10` or `hlg` (see `fixtures::layer_fixture`), `res` is 1080 or 2160
@@ -24,7 +25,7 @@ use filmcraft_time::{FrameRate, Tick, TimeRange};
 use crate::fixtures::layer_fixture;
 use crate::playback::import;
 
-pub const SHAPES: &[&str] = &["mcam-broll", "mcam-punch", "mcam-fx", "nest-pip", "cover", "pip", "mcam", "fx", "gfx", "edit"];
+pub const SHAPES: &[&str] = &["mcam-broll", "mcam-punch", "mcam-fx", "nest-pip", "samefile", "cover", "pip", "mcam", "fx", "gfx", "edit"];
 
 const RATE: FrameRate = FrameRate::FPS_29_97;
 
@@ -62,7 +63,7 @@ pub fn matrix() -> Vec<String> {
         }
     }
     for codec in ["h264", "hevc10"] {
-        for shape in ["mcam", "mcam-broll", "mcam-punch", "mcam-fx", "nest-pip", "fx", "gfx"] {
+        for shape in ["mcam", "mcam-broll", "mcam-punch", "mcam-fx", "nest-pip", "fx", "gfx", "samefile"] {
             let n = if shape == "nest-pip" { 3 } else { 2 };
             v.push(format!("{shape}-{codec}-2160-{n}"));
         }
@@ -187,6 +188,13 @@ pub fn session(spec: &Spec) -> Option<(Session, ItemId)> {
             let tracks: Vec<Vec<TrackItem>> = match shape.as_str() {
                 "cover" => (0..n).map(|i| vec![full(p, i)]).collect(),
                 "pip" => (0..n).map(|i| vec![pip(p, i)]).collect(),
+                "samefile" => {
+                    // the file is 10 s long: 6 s of it from the start, and 6 s from 4 s in
+                    let mut later = clip(p, media[0], sz, 4.0, 6.0);
+                    later.start = Tick::ZERO;
+                    motion(&mut later, 50.0, Some(corner(0, sz)));
+                    vec![vec![clip(p, media[0], sz, 0.0, 6.0)], vec![later]]
+                }
                 "fx" => (0..n)
                     .map(|i| {
                         let mut v = pip(p, i);
