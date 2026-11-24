@@ -26,6 +26,7 @@ pub mod luts;
 pub mod mask;
 pub mod mixer;
 pub mod multicam;
+pub mod occlusion;
 pub mod offline;
 pub mod plan;
 pub mod preview;
@@ -81,11 +82,14 @@ pub struct RenderOptions {
     /// Return the image in the sequence's working space (HDR exports, scopes) instead of
     /// converting it for an SDR monitor. Only matters for HDR / wide-gamut sequences.
     pub working_output: bool,
+    /// Leave out the tracks under a clip that covers the whole frame, opaque and in Normal mode
+    /// ([`occlusion`]). The picture is the same either way; off only draws what cannot be seen.
+    pub occlusion: bool,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { scale: 1.0, effects: true, depth: 0, captions: false, working_output: false }
+        Self { scale: 1.0, effects: true, depth: 0, captions: false, working_output: false, occlusion: true }
     }
 }
 
@@ -201,6 +205,18 @@ pub(crate) enum Layer {
 }
 
 impl Layer {
+    /// Whether the layer replaces everything under it in a `w`×`h` output: the size of the
+    /// output, fully opaque, at 100 % in Normal mode ([`occlusion`]).
+    fn covers(&self, w: usize, h: usize) -> bool {
+        match self {
+            Layer::Full { image, opacity, blend, opaque } => {
+                *opacity == 1.0 && *blend == Blend::Normal && (image.w, image.h) == (w, h) && (*opaque || image.is_opaque())
+            }
+            Layer::Frame { frame, n, opacity, blend } => *opacity == 1.0 && *blend == Blend::Normal && frame.decimated_size(*n) == (w, h),
+            Layer::Region { .. } => false,
+        }
+    }
+
     /// The layer as an image the size of the output, with its opacity and blend mode.
     fn into_full(self, w: usize, h: usize) -> (Image, f32, Blend) {
         match self {
@@ -236,7 +252,28 @@ fn seq_canvas(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, s
         return canvas;
     }
     let tc = format_time(t, seq.settings.frame_rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
-    for (ti, track) in seq.video_tracks.iter().enumerate() {
+    // The clip predicted to cover the frame is made first ([`occlusion`]). When it does cover, the
+    // tracks under it are not rendered at all; when it does not, the next one down that might is
+    // tried, and each layer made here is mixed in when its track's turn comes.
+    let mut first = 0;
+    let mut made: Vec<(usize, Option<Layer>)> = Vec::new();
+    let mut end = if only.is_none() { seq.video_tracks.len() } else { 0 };
+    loop {
+        let floor = occlusion::floor(project, seq, t, opts, opts.depth, end);
+        let Some(item) = seq.video_tracks.get(floor).filter(|_| floor > 0).and_then(|track| track.item_at(t)) else { break };
+        if filmcraft_media::cancel::cancelled() {
+            return canvas;
+        }
+        let layer = item_layer_ex(project, seq, item, t, opts, sources, LayerWant { tc: &tc, allow_region: true });
+        let covers = layer.as_ref().is_some_and(|l| l.covers(w, h));
+        made.push((floor, layer));
+        if covers {
+            first = floor;
+            break;
+        }
+        end = floor;
+    }
+    for (ti, track) in seq.video_tracks.iter().enumerate().skip(first) {
         // A cancelled frame job (playback moved on) stops here; its result is discarded.
         if filmcraft_media::cancel::cancelled() {
             return canvas;
@@ -298,7 +335,11 @@ fn seq_canvas(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, s
             }
             continue;
         }
-        match item_layer_ex(project, seq, item, t, opts, sources, LayerWant { tc: &tc, allow_region: true }) {
+        let layer = match made.iter().position(|(at, _)| *at == ti) {
+            Some(i) => made.swap_remove(i).1,
+            None => item_layer_ex(project, seq, item, t, opts, sources, LayerWant { tc: &tc, allow_region: true }),
+        };
+        match layer {
             Some(Layer::Full { image, opacity, blend: bl, opaque }) => {
                 if canvas.is_empty() && opaque && opacity == 1.0 && bl == Blend::Normal && (image.w, image.h) == (w, h) {
                     // mixing an opaque layer over transparent black gives the layer itself
@@ -727,7 +768,8 @@ pub(crate) fn base_layer(
             media_image(project, seq, item, t, MediaFrame { src: &src, frame: &frame, n }, want)
         }
         ItemKind::Sequence(nested) => {
-            let sub = RenderOptions { scale: want, effects: opts.effects, depth: opts.depth + 1, captions: false, working_output: true };
+            let sub =
+                RenderOptions { scale: want, effects: opts.effects, depth: opts.depth + 1, captions: false, working_output: true, occlusion: opts.occlusion };
             match item.multicam_angle(nested) {
                 // a multi-camera clip shows its angle's track only (nothing for an audio-only angle)
                 Some(angle) => match nested.angle_video_track_index(angle) {
@@ -868,6 +910,9 @@ mod mixer_tests;
 
 #[cfg(test)]
 mod nest_tests;
+
+#[cfg(test)]
+mod occlusion_tests;
 
 #[cfg(test)]
 #[path = "preview_tests.rs"]

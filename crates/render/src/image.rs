@@ -179,6 +179,12 @@ impl Image {
         self
     }
 
+    /// Whether every pixel's alpha is exactly 1: mixed over anything in Normal mode, the image
+    /// replaces it (see [`crate::occlusion`]).
+    pub fn is_opaque(&self) -> bool {
+        !self.px.is_empty() && self.px.par_chunks(1 << 16).all(|c| c.as_chunks::<4>().0.iter().all(|p| p[3] == 1.0))
+    }
+
     pub fn scale_alpha(&mut self, a: f32) {
         if (a - 1.0).abs() < 1e-6 {
             return;
