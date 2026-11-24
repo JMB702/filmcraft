@@ -523,7 +523,22 @@ fn post_comment(w: &mut TcpStream, req: &Request, peer: SocketAddr, state: &Stat
     {
         let _g = lock(&state.write);
         let log = state.dir.read_events(&share.id).unwrap_or_default();
-        if log.len() >= MAX_EVENTS || fold(&log).len() >= MAX_COMMENTS {
+        let standing = fold(&log);
+        // the same comment again from the same device (its first answer was lost on a bad
+        // connection and the page sent it again): answer with the one already saved
+        if !ev.device.is_empty()
+            && let Some(c) = standing
+                .iter()
+                .find(|c| c.frame == ev.frame && c.text == ev.text && c.author == ev.author && owner(&log, &c.id).as_deref() == Some(ev.device.as_str()))
+        {
+            if p.form {
+                let to = format!("/r/{}/#c-{}", share.token, c.id);
+                http::respond(w, 303, "text/plain; charset=utf-8", &[("Location", to), ("Cache-Control", "no-store".into())], b"", false, false)?;
+                return Ok(true);
+            }
+            return json_reply(w, 201, &serde_json::to_value(c).map_err(io::Error::other)?, false);
+        }
+        if log.len() >= MAX_EVENTS || standing.len() >= MAX_COMMENTS {
             return error_reply(w, 507, "This review has reached its comment limit.", &[]);
         }
         if let Err(e) = state.dir.append_event(&share.id, &ev) {
@@ -688,16 +703,20 @@ fn video(w: &mut TcpStream, req: &Request, state: &State, share: &ShareRecord, f
         return not_found(w, req);
     }
     let Some(path) = state.dir.media_path(&share.id, name) else { return not_found(w, req) };
-    send_file(w, req, &path, "video/mp4", head)
+    // a rendered file never changes (a new version is a new link), so the browser may keep what
+    // it has and ask only for the bytes it lacks
+    send_file(w, req, &path, "video/mp4", "private, max-age=86400, immutable", head)
 }
 
-fn send_file(w: &mut TcpStream, req: &Request, path: &Path, mime: &str, head: bool) -> io::Result<bool> {
+/// Serve a file with byte ranges, so a player on a bad connection asks again for only the part it
+/// is missing. `cache`: the `Cache-Control` value.
+fn send_file(w: &mut TcpStream, req: &Request, path: &Path, mime: &str, cache: &str, head: bool) -> io::Result<bool> {
     let Ok(mut f) = std::fs::File::open(path) else { return not_found(w, req) };
     let meta = f.metadata()?;
     let len = meta.len();
     let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
     let etag = format!("\"{len:x}-{mtime:x}\"");
-    let mut h: Vec<(&str, String)> = vec![("Accept-Ranges", "bytes".into()), ("ETag", etag.clone()), ("Cache-Control", "private, max-age=3600".into())];
+    let mut h: Vec<(&str, String)> = vec![("Accept-Ranges", "bytes".into()), ("ETag", etag.clone()), ("Cache-Control", cache.into())];
     if req.header("if-none-match") == Some(etag.as_str()) {
         http::write_head(w, 304, &h, false)?;
         w.flush()?;

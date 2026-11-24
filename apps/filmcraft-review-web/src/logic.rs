@@ -108,10 +108,19 @@ pub struct Device {
     pub cellular: bool,
     /// `navigator.connection.effectiveType` is `slow-2g`, `2g` or `3g`.
     pub slow: bool,
+    /// The download speed the page measured on its own files, in kbit/s (see [`throughput_kbps`]).
+    pub measured_kbps: Option<f64>,
 }
 
-/// The file to play: the reviewer's choice when it is ready, else small on phones, cellular, slow
-/// links or Save-Data, else the largest. Renditions are smallest first.
+/// A file plays without stalling when the connection carries this many times its bitrate.
+const HEADROOM: f64 = 1.5;
+
+/// The file to start with. Renditions are smallest first.
+/// - The reviewer's own choice, when that file is ready.
+/// - The smallest on Save-Data or a link the browser calls slow.
+/// - With a measured speed: the largest file the connection carries with headroom (phones stop at
+///   540p: a larger picture is wasted on the screen).
+/// - Without one: 540p on phones and cellular, else the largest.
 pub fn pick_rendition(ready: &[Rendition], choice: Option<&str>, d: Device) -> Option<usize> {
     if ready.is_empty() {
         return None;
@@ -119,13 +128,161 @@ pub fn pick_rendition(ready: &[Rendition], choice: Option<&str>, d: Device) -> O
     if let Some(i) = choice.and_then(|c| ready.iter().position(|r| r.name == c)) {
         return Some(i);
     }
+    if d.save_data || d.slow {
+        return Some(0);
+    }
     let phone = d.viewport_width.is_finite() && d.viewport_width > 0.0 && d.viewport_width < 700.0;
-    if d.save_data || d.cellular || d.slow || phone { Some(0) } else { Some(ready.len() - 1) }
+    let sd = ready.iter().rposition(|r| r.height <= 540 && r.width <= 960).unwrap_or(0);
+    let cap = if phone { sd } else { ready.len() - 1 };
+    match d.measured_kbps.filter(|k| k.is_finite() && *k > 0.0) {
+        Some(k) => Some(ready.iter().take(cap + 1).rposition(|r| f64::from(r.bitrate_kbps) * HEADROOM <= k).unwrap_or(0)),
+        None if phone || d.cellular => Some(sd),
+        None => Some(ready.len() - 1),
+    }
 }
 
 /// The quality chip's label for a rendition.
 pub fn quality_label(r: &Rendition) -> &'static str {
-    if r.height >= 720 || r.width >= 1280 { "HD" } else { "SD" }
+    if r.height >= 720 || r.width >= 1280 {
+        "HD"
+    } else if r.height <= 400 && r.width <= 720 {
+        "Low"
+    } else {
+        "SD"
+    }
+}
+
+/// Download speed in kbit/s from one finished transfer of `bytes` over `ms` milliseconds. `None`
+/// for a transfer too small or too quick to say anything (a cached file reports 0 bytes).
+pub fn throughput_kbps(bytes: f64, ms: f64) -> Option<f64> {
+    if !bytes.is_finite() || !ms.is_finite() || bytes < 100_000.0 || ms < 80.0 {
+        return None;
+    }
+    Some(bytes * 8.0 / ms)
+}
+
+/// What the stall watch says about playback right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stall {
+    /// Playing, or not asked to.
+    Fine,
+    /// The picture has waited long enough to say so (a spinner).
+    Buffering,
+    /// The connection is not carrying this file: time to do something. Said again each time
+    /// another [`Watch::BUDGET_MS`] of frozen time adds up.
+    Stuck,
+}
+
+/// Watches whether the video's time advances while it should, every animation frame. Frozen time
+/// adds to a debt and playing pays it off slowly, so one long freeze and a run of short ones (a
+/// file the connection cannot quite carry plays in sub-second bursts) both come to "stuck".
+#[derive(Debug, Clone, PartialEq)]
+pub struct Watch {
+    last_time: f64,
+    last_tick: f64,
+    moved_at: f64,
+    debt: f64,
+}
+
+impl Watch {
+    /// A wait this long shows the spinner (shorter ones are ordinary seeks).
+    pub const SHOW_MS: f64 = 700.0;
+    /// Time between two reported positions that is not a freeze (browsers step `currentTime`).
+    pub const GRACE_MS: f64 = 150.0;
+    /// This much frozen time is stuck.
+    pub const BUDGET_MS: f64 = 5000.0;
+    /// A second of playing forgives this much of a second of freezing.
+    pub const FORGIVE: f64 = 0.2;
+
+    pub fn new(now: f64) -> Watch {
+        Watch { last_time: 0.0, last_tick: now, moved_at: now, debt: 0.0 }
+    }
+
+    /// Start counting afresh (a new file, a retry).
+    pub fn reset(&mut self, now: f64) {
+        self.moved_at = now;
+        self.last_tick = now;
+        self.debt = 0.0;
+    }
+
+    /// `active`: the video should be moving or seeking. `time`: its `currentTime`.
+    pub fn tick(&mut self, now: f64, active: bool, time: f64) -> Stall {
+        if !now.is_finite() {
+            return Stall::Fine;
+        }
+        let gap = now - self.last_tick;
+        self.last_tick = now;
+        // against the position at the last move, not the last frame: at 120 frames a second one
+        // frame of playback is less than the threshold
+        let moved = time.is_finite() && (time - self.last_time).abs() > 0.01;
+        if moved {
+            self.last_time = time;
+        }
+        // frames stopped (the tab was hidden, the phone locked): that gap is not a freeze
+        if !active || !(0.0..=2000.0).contains(&gap) {
+            self.moved_at = now;
+            return Stall::Fine;
+        }
+        if moved {
+            self.debt = (self.debt - gap * Self::FORGIVE).max(0.0);
+            self.moved_at = now;
+            return Stall::Fine;
+        }
+        let waited = now - self.moved_at;
+        if waited > Self::GRACE_MS {
+            self.debt += gap;
+        }
+        if self.debt >= Self::BUDGET_MS {
+            self.debt = 0.0;
+            return Stall::Stuck;
+        }
+        if waited >= Self::SHOW_MS { Stall::Buffering } else { Stall::Fine }
+    }
+}
+
+/// How long to wait before retry number `attempt` (from 1): 2 s, doubling, at most 30 s.
+pub fn backoff_ms(attempt: u32) -> f64 {
+    let n = attempt.clamp(1, 5) - 1;
+    (2000.0 * f64::from(1u32 << n)).min(30_000.0)
+}
+
+/// Where the buffered stretch around `time` sits on the scrub bar: `(left %, width %)`.
+/// `ranges` are the video's buffered `(start, end)` seconds.
+pub fn buffered_span(ranges: &[(f64, f64)], time: f64, duration: f64) -> Option<(f64, f64)> {
+    if !time.is_finite() || !duration.is_finite() || duration <= 0.0 {
+        return None;
+    }
+    let (a, b) = ranges.iter().copied().find(|(a, b)| a.is_finite() && b.is_finite() && *a <= time + 0.25 && time <= *b + 0.25)?;
+    let left = (a / duration).clamp(0.0, 1.0) * 100.0;
+    let right = (b / duration).clamp(0.0, 1.0) * 100.0;
+    (right > left).then_some((left, right - left))
+}
+
+/// A comment written while there was no connection, kept until it can be sent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Queued {
+    pub name: String,
+    pub text: String,
+    pub frame: i64,
+}
+
+/// `localStorage` key prefix of the waiting comments, per link (like [`OWN_KEY`]).
+pub const OUTBOX_KEY: &str = "filmcraft-review-outbox-";
+/// At most this many comments wait.
+pub const MAX_QUEUED: usize = 50;
+
+/// Waiting comments from storage; anything that would not pass the server's checks is dropped.
+pub fn parse_outbox(s: &str) -> Vec<Queued> {
+    let list: Vec<Queued> = serde_json::from_str(s).unwrap_or_default();
+    list.into_iter()
+        .filter_map(|q| Some(Queued { name: clean_name(&q.name)?, text: clean_comment(&q.text)?, frame: q.frame.max(0) }))
+        .take(MAX_QUEUED)
+        .collect()
+}
+
+/// Waiting comments for storage.
+pub fn store_outbox(list: &[Queued]) -> String {
+    serde_json::to_string(list).unwrap_or_else(|_| "[]".into())
 }
 
 /// Apply a live event to the comment list (kept in frame, then time order). Edits and deletes
@@ -310,10 +467,6 @@ mod tests {
         }
     }
 
-    fn r(name: &str, w: u32, h: u32) -> Rendition {
-        Rendition { name: name.into(), width: w, height: h, bitrate_kbps: 1 }
-    }
-
     fn ev(kind: EventKind, comment: &str, text: &str, frame: i64, at: i64) -> CommentEvent {
         CommentEvent { id: format!("e{at}"), kind, comment: comment.into(), author: "A".into(), text: text.into(), frame, device: String::new(), at_unix: at }
     }
@@ -377,20 +530,128 @@ mod tests {
     }
 
     #[test]
-    fn phones_and_slow_links_get_the_small_file() {
-        let ready = [r("small", 960, 540), r("hd", 1920, 1080)];
+    fn the_starting_file_fits_the_screen_and_the_connection() {
+        let r = |name: &str, w, h, k| Rendition { name: name.into(), width: w, height: h, bitrate_kbps: k };
+        let three = [r("low", 640, 360, 500), r("small", 960, 540, 1400), r("hd", 1920, 1080, 6000)];
+        let two = [r("small", 960, 540, 1400), r("hd", 1920, 1080, 6000)];
+        let phone = Device { viewport_width: 390.0, ..Default::default() };
         let desk = Device { viewport_width: 1400.0, ..Default::default() };
-        assert_eq!(pick_rendition(&ready, None, desk), Some(1));
-        assert_eq!(pick_rendition(&ready, None, Device { viewport_width: 390.0, ..Default::default() }), Some(0));
-        assert_eq!(pick_rendition(&ready, None, Device { save_data: true, ..desk }), Some(0));
-        assert_eq!(pick_rendition(&ready, None, Device { cellular: true, ..desk }), Some(0));
-        assert_eq!(pick_rendition(&ready, None, Device { slow: true, ..desk }), Some(0));
-        // the reviewer's choice wins when that file is ready
-        assert_eq!(pick_rendition(&ready, Some("hd"), Device { viewport_width: 390.0, ..Default::default() }), Some(1));
-        assert_eq!(pick_rendition(&ready[..1], Some("hd"), desk), Some(0));
         assert_eq!(pick_rendition(&[], None, desk), None);
-        assert_eq!(pick_rendition(&ready, None, Device { viewport_width: f64::NAN, ..Default::default() }), Some(1));
-        assert_eq!((quality_label(&ready[0]), quality_label(&ready[1])), ("SD", "HD"));
+        // no measurement: 540p on phones and cellular, the largest elsewhere
+        assert_eq!(pick_rendition(&three, None, phone), Some(1));
+        assert_eq!(pick_rendition(&two, None, phone), Some(0));
+        assert_eq!(pick_rendition(&three, None, desk), Some(2));
+        assert_eq!(pick_rendition(&three, None, Device { cellular: true, ..desk }), Some(1));
+        // a slow link or Save-Data: the lightest
+        assert_eq!(pick_rendition(&three, None, Device { slow: true, ..desk }), Some(0));
+        assert_eq!(pick_rendition(&three, None, Device { save_data: true, ..phone }), Some(0));
+        // measured: the largest file with headroom, phones stopping at 540p
+        let at = |d: Device, k: f64| pick_rendition(&three, None, Device { measured_kbps: Some(k), ..d });
+        assert_eq!(at(phone, 600.0), Some(0));
+        assert_eq!(at(phone, 2000.0), Some(0));
+        assert_eq!(at(phone, 2100.0), Some(1));
+        assert_eq!(at(phone, 50_000.0), Some(1));
+        assert_eq!(at(desk, 8000.0), Some(1));
+        assert_eq!(at(desk, 9000.0), Some(2));
+        assert_eq!(at(desk, 10.0), Some(0));
+        for bad in [f64::NAN, f64::INFINITY, 0.0, -5.0] {
+            assert!(pick_rendition(&three, None, Device { measured_kbps: Some(bad), viewport_width: bad, ..Default::default() }).is_some());
+        }
+        // the reviewer's choice wins when that file is ready
+        assert_eq!(pick_rendition(&three, Some("hd"), Device { slow: true, ..phone }), Some(2));
+        assert_eq!(pick_rendition(&two, Some("low"), phone), Some(0));
+        assert_eq!(quality_label(&three[0]), "Low");
+        assert_eq!(quality_label(&three[1]), "SD");
+        assert_eq!(quality_label(&three[2]), "HD");
+        assert_eq!(throughput_kbps(370_000.0, 2960.0), Some(1000.0));
+        assert_eq!(throughput_kbps(0.0, 500.0), None);
+        assert_eq!(throughput_kbps(370_000.0, 3.0), None);
+        assert_eq!(throughput_kbps(f64::NAN, f64::NAN), None);
+    }
+
+    #[test]
+    fn freezes_add_up_to_stuck_and_a_hidden_tab_is_not_a_freeze() {
+        // 16 ms frames; `pattern`: (ms, active, moving) stretches. Returns each change of verdict
+        // and when the first Stuck came.
+        fn run(w: &mut Watch, now: &mut f64, t: &mut f64, pattern: &[(f64, bool, bool)]) -> (Vec<Stall>, Option<f64>) {
+            let (mut seen, mut stuck_at, start) = (Vec::new(), None, *now);
+            for &(ms, active, moving) in pattern {
+                let end = *now + ms;
+                while *now < end {
+                    *now += 16.0;
+                    if moving {
+                        *t += 0.016;
+                    }
+                    let v = w.tick(*now, active, *t);
+                    if v == Stall::Stuck && stuck_at.is_none() {
+                        stuck_at = Some(*now - start);
+                    }
+                    if seen.last() != Some(&v) {
+                        seen.push(v);
+                    }
+                }
+            }
+            (seen, stuck_at)
+        }
+        let (mut w, mut now, mut t) = (Watch::new(0.0), 0.0, 0.0);
+        assert_eq!(run(&mut w, &mut now, &mut t, &[(3000.0, true, true)]), (vec![Stall::Fine], None));
+        // paused: never a freeze
+        assert_eq!(run(&mut w, &mut now, &mut t, &[(20_000.0, false, false)]), (vec![Stall::Fine], None));
+        // one long freeze: the spinner, then stuck after about five seconds, and again after five more
+        let (seen, at) = run(&mut w, &mut now, &mut t, &[(11_000.0, true, false)]);
+        assert_eq!(seen, [Stall::Fine, Stall::Buffering, Stall::Stuck, Stall::Buffering, Stall::Stuck, Stall::Buffering]);
+        assert!(at.is_some_and(|a| (5000.0..5500.0).contains(&a)), "{at:?}");
+        // a file the link cannot carry: half a second of picture, a second frozen, over and over.
+        // No single freeze is long, but it is stuck within a quarter of a minute
+        w.reset(now);
+        let flutter: Vec<(f64, bool, bool)> = (0..20).flat_map(|_| [(500.0, true, true), (1000.0, true, false)]).collect();
+        let (_, at) = run(&mut w, &mut now, &mut t, &flutter);
+        assert!(at.is_some_and(|a| (6000.0..15_000.0).contains(&a)), "{at:?}");
+        // an ordinary watch with a short seek now and then never is
+        w.reset(now);
+        let fine: Vec<(f64, bool, bool)> = (0..40).flat_map(|_| [(9000.0, true, true), (600.0, true, false)]).collect();
+        assert_eq!(run(&mut w, &mut now, &mut t, &fine).1, None);
+        // fast screens (120 Hz phones, 160 Hz here): each frame moves the video only a few
+        // milliseconds, and that is still playing
+        for frame_ms in [4.0, 6.0, 8.3] {
+            let (mut w, mut now, mut t) = (Watch::new(0.0), 0.0, 0.0);
+            while now < 30_000.0 {
+                now += frame_ms;
+                t += frame_ms / 1000.0;
+                assert_eq!(w.tick(now, true, t), Stall::Fine, "{frame_ms} ms frames at {now}");
+            }
+        }
+        // the tab was hidden for a minute: no frames, so no freeze
+        let mut w = Watch::new(0.0);
+        assert_eq!(w.tick(16.0, true, 1.0), Stall::Fine);
+        assert_eq!(w.tick(60_000.0, true, 1.0), Stall::Fine);
+        assert_eq!(w.tick(60_016.0, true, 1.0), Stall::Fine);
+        // hostile clocks and times
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            let _ = w.tick(bad, true, bad);
+        }
+        assert_eq!([1, 2, 3, 4, 5, 9, 0].map(backoff_ms), [2000.0, 4000.0, 8000.0, 16_000.0, 30_000.0, 30_000.0, 2000.0]);
+    }
+
+    #[test]
+    fn the_buffered_bar_and_the_waiting_comments() {
+        let ranges = [(0.0, 12.0), (40.0, 55.0)];
+        assert_eq!(buffered_span(&ranges, 6.0, 120.0), Some((0.0, 10.0)));
+        let (l, w) = buffered_span(&ranges, 40.1, 120.0).unwrap_or_default();
+        assert!((l - 33.333).abs() < 0.01 && (w - 12.5).abs() < 0.01);
+        assert_eq!(buffered_span(&ranges, 30.0, 120.0), None);
+        assert_eq!(buffered_span(&ranges, 6.0, 0.0), None);
+        assert_eq!(buffered_span(&[(f64::NAN, 5.0), (5.0, 1.0)], 3.0, 10.0), None);
+        assert_eq!(buffered_span(&[(0.0, 500.0)], 3.0, 10.0), Some((0.0, 100.0)));
+        let q = vec![Queued { name: "Jeff".into(), text: "Trim this".into(), frame: 48 }];
+        assert_eq!(parse_outbox(&store_outbox(&q)), q);
+        assert_eq!(parse_outbox("not json"), []);
+        assert_eq!(
+            parse_outbox(r#"[{"name":"  ","text":"x","frame":1},{"name":"A","text":"","frame":1},{"name":"A","text":"ok","frame":-9}]"#),
+            [Queued { name: "A".into(), text: "ok".into(), frame: 0 }]
+        );
+        let many = vec![q[0].clone(); 80];
+        assert_eq!(parse_outbox(&store_outbox(&many)).len(), MAX_QUEUED);
     }
 
     #[test]

@@ -89,13 +89,14 @@ pub fn render(p: &PageInput) -> String {
             h.push_str("</div>\n");
             // the scripted page's own transport, under the picture (the browser's controls cover it)
             h.push_str("<div class=\"scrub js\" id=\"scrub\" hidden>");
-            h.push_str("<button id=\"play\" class=\"ic pp\" type=\"button\" aria-label=\"Play\"></button>");
             h.push_str("<div class=\"track\" id=\"track\"><div class=\"fill\" id=\"fill\"></div><div class=\"ticks\" id=\"ticks\"></div><div class=\"head\" id=\"head\"></div></div>");
+            h.push_str("<output id=\"tc\" class=\"tc\" aria-live=\"off\">--:--:--:--</output>");
             h.push_str("<button id=\"fs\" class=\"ic fs\" type=\"button\" aria-label=\"Full screen\"></button></div>\n");
+            // the play row: thumb-sized, play in the middle
             h.push_str("<div class=\"tools js\" id=\"tools\" hidden>\n");
             h.push_str("<button id=\"back10\" class=\"step\" type=\"button\" aria-label=\"Back 10 seconds\"><span aria-hidden=\"true\">«</span> 10s</button>\n");
             h.push_str("<button id=\"back\" class=\"step\" type=\"button\" aria-label=\"Back one frame\"><span aria-hidden=\"true\">‹</span> 1f</button>\n");
-            h.push_str("<output id=\"tc\" class=\"tc\" aria-live=\"off\">--:--:--:--</output>\n");
+            h.push_str("<button id=\"play\" class=\"ic pp\" type=\"button\" aria-label=\"Play\"></button>\n");
             h.push_str("<button id=\"fwd\" class=\"step\" type=\"button\" aria-label=\"Forward one frame\">1f <span aria-hidden=\"true\">›</span></button>\n");
             h.push_str("<button id=\"fwd10\" class=\"step\" type=\"button\" aria-label=\"Forward 10 seconds\">10s <span aria-hidden=\"true\">»</span></button>\n</div>\n");
         }

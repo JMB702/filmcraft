@@ -67,8 +67,10 @@ fn dir(s: &Session, cmd: &str) -> Result<ReviewDir> {
     s.review.dir.clone().ok_or_else(|| bad(cmd, "review links are not available in this build"))
 }
 
-/// The two renditions for a sequence of `w`×`h`: `small` within 960×540 for phones on cellular,
-/// `hd` within 1920×1080. A sequence no larger than 960×540 gets only `small`.
+/// The renditions for a sequence of `w`×`h`, smallest first (the order they render in, so the
+/// link plays as soon as the lightest is done): `low` within 640×360 for a weak phone signal,
+/// `small` within 960×540 for phones, `hd` within 1920×1080. Sizes the sequence is too small for
+/// are left out.
 pub fn renditions(w: u32, h: u32) -> Vec<Rendition> {
     fn fit(w: u32, h: u32, mw: u32, mh: u32) -> (u32, u32) {
         let (w, h) = (w.max(2), h.max(2));
@@ -76,13 +78,14 @@ pub fn renditions(w: u32, h: u32) -> Vec<Rendition> {
         let even = |v: f64| ((v / 2.0).round() as u32 * 2).max(2);
         (even(f64::from(w) * s), even(f64::from(h) * s))
     }
-    let (sw, sh) = fit(w, h, 960, 540);
-    let small = Rendition { name: "small".into(), width: sw, height: sh, bitrate_kbps: 1400 };
-    let (hw, hh) = fit(w, h, 1920, 1080);
-    if (hw, hh) == (sw, sh) {
-        return vec![small];
+    let mut out: Vec<Rendition> = Vec::new();
+    for (name, mw, mh, kbps) in [("low", 640, 360, 500), ("small", 960, 540, 1400), ("hd", 1920, 1080, 6000)] {
+        let (rw, rh) = fit(w, h, mw, mh);
+        if out.last().is_none_or(|l| (l.width, l.height) != (rw, rh)) {
+            out.push(Rendition { name: name.into(), width: rw, height: rh, bitrate_kbps: kbps });
+        }
     }
-    vec![small, Rendition { name: "hd".into(), width: hw, height: hh, bitrate_kbps: 6000 }]
+    out
 }
 
 /// The base of review links: the public URL (tunnel) when set, else this Mac's LAN address.

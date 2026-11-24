@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 filmcraft-review = { workspace = true }
 filmcraft-time = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -41,6 +42,7 @@ web-sys = { version = "0.3", features = [
     "HtmlFormElement",
     "HtmlInputElement",
     "HtmlMediaElement",
+    "MediaError",
     "HtmlTextAreaElement",
     "HtmlVideoElement",
     "KeyboardEvent",
@@ -57,6 +59,7 @@ web-sys = { version = "0.3", features = [
     "ScrollIntoViewOptions",
     "ScrollLogicalPosition",
     "Storage",
+    "TimeRanges",
     "VisualViewport",
     "Window",
 ] }

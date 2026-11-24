@@ -7,8 +7,11 @@
 //! - live comments from other reviewers (server-sent events);
 //! - the name asked once and remembered on the device, and a device secret so a reviewer can edit
 //!   or delete their own comments;
-//! - the small or 1080p file by screen and connection, switchable;
-//! - play, pause and full screen under the video, so nothing covers the picture;
+//! - the file the screen and the connection can carry, switchable, and a lighter one by itself
+//!   when playback keeps freezing; retries after a network error; comments written with no
+//!   connection kept and sent when it returns;
+//! - a thumb-sized play row, the scrub bar and full screen under the video, so nothing covers the
+//!   picture;
 //! - a page that fits the visible screen: the video stays at the top, only the comments scroll,
 //!   and the composer sits right above the on-screen keyboard.
 //!
