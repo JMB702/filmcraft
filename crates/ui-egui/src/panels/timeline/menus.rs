@@ -183,7 +183,9 @@ pub(super) fn ruler_menu(app: &mut FilmcraftApp, ctx: &egui::Context, ui: &mut e
             let r = ui.add_enabled(app.session.is_enabled(cmd), egui::Button::new(label));
             app.auto.add(&format!("timeline.rulerMenu.{cmd}"), r.rect, label);
             if r.clicked() {
-                if let Err(e) = crate::menus::invoke(app, ctx, cmd, json!({})) {
+                // the ruler's Add Marker marks the sequence, whatever clips are selected
+                let params = if cmd == "markers.add" { json!({"selection": false}) } else { json!({}) };
+                if let Err(e) = crate::menus::invoke(app, ctx, cmd, params) {
                     app.ui.status = e;
                 }
                 ui.close();

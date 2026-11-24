@@ -8,7 +8,18 @@ use filmcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-fn list(project: &mut Project, owner: ItemId) -> Result<&mut Vec<Marker>> {
+/// Who keeps the markers being edited: a media item or sequence, or one clip of a sequence.
+#[derive(Clone, Copy)]
+enum Owner {
+    Item(ItemId),
+    Clip(ItemId, filmcraft_project::ClipId),
+}
+
+fn list(project: &mut Project, owner: Owner) -> Result<&mut Vec<Marker>> {
+    let owner = match owner {
+        Owner::Item(id) => id,
+        Owner::Clip(seq, clip) => return crate::clip_markers::home_list(project, seq, crate::clip_markers::MarkerHome::Clip(clip)),
+    };
     match &mut project.item_mut(owner).ok_or_else(|| EngineError::Other("Marker owner no longer exists".into()))?.kind {
         filmcraft_project::ItemKind::Media(m) => Ok(&mut m.markers),
         filmcraft_project::ItemKind::Sequence(q) => Ok(&mut std::sync::Arc::make_mut(q).markers),
@@ -40,14 +51,21 @@ pub(crate) fn run(s: &mut Session, p: &Value, delete: bool) -> Result<Value> {
         None | Some(Value::String(_)) if p.get("target").is_none_or(|v| v == "program") => {
             let owner = item(p, "sequence", s.state.active_sequence, id)?;
             let q = s.project.sequence(owner).ok_or_else(|| bad(id, "no such sequence"))?;
-            (owner, q.settings.frame_rate, Tick::ZERO, Tick::MAX, None)
+            (Owner::Item(owner), q.settings.frame_rate, Tick::ZERO, Tick::MAX, None)
+        }
+        Some(Value::String(t)) if t == "clip" => {
+            let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+            let clip = p.get("clip").and_then(Value::as_u64).map(filmcraft_project::ClipId).ok_or_else(|| bad(id, "need clip id"))?;
+            let q = s.project.sequence(seq).ok_or_else(|| bad(id, "no such sequence"))?;
+            q.find_item(clip).ok_or_else(|| bad(id, "no such clip in the active sequence"))?;
+            (Owner::Clip(seq, clip), q.settings.frame_rate, Tick::ZERO, Tick::MAX, None)
         }
         Some(Value::String(t)) if t == "source" => {
             let source = item(p, "item", s.state.source_item, id)?;
             let v = crate::clip_ops::source_view(s, source).ok_or_else(|| bad(id, "no such source"))?;
-            (v.media, v.rate, v.start, v.end, Some(v.markers.iter().map(|m| m.id).collect::<BTreeSet<_>>()))
+            (Owner::Item(v.media), v.rate, v.start, v.end, Some(v.markers.iter().map(|m| m.id).collect::<BTreeSet<_>>()))
         }
-        _ => return Err(bad(id, "target must be program or source")),
+        _ => return Err(bad(id, "target must be program, source or clip")),
     };
     let ids: BTreeSet<MarkerId> = if let Some(v) = p.get("markers") {
         if p.get("marker").is_some() {

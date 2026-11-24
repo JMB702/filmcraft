@@ -609,6 +609,7 @@ fn shortcuts_suppressed_while_clip_dialog_open() {
 fn clip_context_menu_adds_a_marker_at_the_playhead_with_one_undo() {
     for audio in [false, true] {
         let mut d = Driver::new();
+        d.exec("edit.deselectAll", json!({}));
         d.exec("markers.clearAll", json!({}));
         d.exec("playhead.set", json!({"frame": 35}));
         let seq = d.app().session.active_sequence().unwrap();
@@ -620,9 +621,16 @@ fn clip_context_menu_adds_a_marker_at_the_playhead_with_one_undo() {
         d.frames(3);
         assert!(d.has("timeline.clipMenu.markers.add"), "Add Marker is available on video and audio clips");
         d.click("timeline.clipMenu.markers.add");
-        let markers = &d.app().session.active_sequence().unwrap().markers;
-        assert_eq!(markers.len(), 1);
-        assert_eq!(markers[0].start, playhead);
+        // the right-clicked clip is selected and under the playhead: Add Marker marks the clip
+        assert!(d.app().session.active_sequence().unwrap().markers.is_empty(), "a clip marker, not a sequence marker");
+        let shown = {
+            let s = &d.app().session;
+            let q = s.active_sequence().unwrap();
+            let it = q.find_item(clip).unwrap().1;
+            filmcraft_engine::clip_markers::clip_markers(&s.project, q, it)
+        };
+        assert_eq!(shown.len(), 1, "the clip shows one marker");
+        assert_eq!(shown[0].start, playhead, "at the playhead");
         assert_eq!(d.app().session.history.undo.len(), history + 1);
         let after = d.app().session.project.clone();
         d.exec("edit.undo", json!({}));

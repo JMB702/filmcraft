@@ -73,6 +73,7 @@ mod source_drag_ui;
 mod source_playback_ui;
 mod status_bar_ui;
 mod timecode_ui;
+mod timeline_clip_markers_ui;
 mod timeline_drop_ui;
 mod timeline_escape_ui;
 mod timeline_gap_ui;

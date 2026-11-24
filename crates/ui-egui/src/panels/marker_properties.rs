@@ -85,8 +85,19 @@ pub fn open(app: &mut FilmcraftApp, marker: &Marker) {
 }
 /// The marker that starts on the frame the playhead of the Source (`source`) or Program monitor
 /// shows. Add Marker (M) on such a frame opens it here instead of stacking a second marker on it,
-/// as Premiere does; of coincident markers the first in the list wins.
-pub fn at_playhead(app: &FilmcraftApp, source: bool) -> Option<(Marker, Owner)> {
+/// as Premiere does; of coincident markers the first in the list wins. In the Timeline with
+/// `clips` and selected clips under the playhead, M marks those clips, so only their clip markers
+/// count (a clip marker kept on the clip itself has no dialog: M adds another).
+pub fn at_playhead(app: &FilmcraftApp, source: bool, clips: bool) -> Option<(Marker, Owner)> {
+    if !source && clips && !filmcraft_engine::clip_markers::selected_under(&app.session, app.session.playhead()).is_empty() {
+        let cm = filmcraft_engine::clip_markers::at_playhead(&app.session)?;
+        let owner = match cm.home {
+            filmcraft_engine::clip_markers::MarkerHome::Source(id) => Owner::Source(id.0),
+            filmcraft_engine::clip_markers::MarkerHome::Nest(id) => Owner::Sequence(id.0),
+            filmcraft_engine::clip_markers::MarkerHome::Clip(_) => return None,
+        };
+        return Some((cm.marker, owner));
+    }
     let owner = Owner::current(app, source)?;
     let (_, clock, markers) = owner.details(app)?;
     let rate = clock.rate;

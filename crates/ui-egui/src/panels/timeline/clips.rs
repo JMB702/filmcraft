@@ -281,6 +281,7 @@ pub(super) fn draw_clip(
             },
         );
     }
+    draw_clip_markers(app, ctx, &clip_p, body, it);
     // fx badge right-aligned in the header (italic-ish "fx")
     if (it.has_standard_effects() || it.has_modified_intrinsics()) && w > 40.0 {
         let col = if it.has_standard_effects() { Color32::from_rgb(0xe8, 0xc5, 0x4a) } else { Color32::from_rgb(0x91, 0xa2, 0xac) };
@@ -313,6 +314,39 @@ pub(super) fn draw_clip(
     if selected {
         p.rect_stroke(body.shrink(1.0), 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Inside);
         p.rect_stroke(body, 0.0, Stroke::new(2.0, t.clip_selected_border), StrokeKind::Inside);
+    }
+}
+
+/// Clip markers along the top of a clip: its master clip's (or nested sequence's) markers inside
+/// the part it plays, and its own, in the marker colours. A range marker also gets a band.
+fn draw_clip_markers(app: &mut FilmcraftApp, ctx: &egui::Context, p: &egui::Painter, body: Rect, it: &TrackItem) {
+    if it.duration <= Tick::ZERO || body.width() < 4.0 {
+        return;
+    }
+    let markers = {
+        let project = &app.session.project;
+        app.session.active_sequence().map(|q| filmcraft_engine::clip_markers::clip_markers(project, q, it)).unwrap_or_default()
+    };
+    let x_of = |t: Tick| body.min.x + ((t - it.start).0 as f64 / it.duration.0 as f64) as f32 * body.width();
+    for cm in &markers {
+        let m = &cm.marker;
+        let c = m.custom_color.map_or_else(|| app.session.prefs.labels.rgb(m.color), |c| c.0);
+        let c = Color32::from_rgb(c[0], c[1], c[2]);
+        let x = x_of(cm.start);
+        if cm.duration > Tick::ZERO {
+            let band = Rect::from_min_max(pos2(x, body.min.y + 1.0), pos2(x_of(cm.start + cm.duration), body.min.y + 4.0));
+            p.rect_filled(band, 0.0, c.gamma_multiply(0.6));
+        }
+        let glyph = Rect::from_min_size(pos2(x - 3.5, body.min.y + 1.0), vec2(7.0, 9.0));
+        crate::widgets::marker_glyph(p, glyph, 3.0, crate::widgets::MarkerPart::Whole, c);
+        let hit = glyph.expand(1.0);
+        app.auto.add(&format!("timeline.clipMarker.{}.{}", it.id.0, m.id.0), hit, &m.name);
+        let hovered = ctx.pointer_hover_pos().is_some_and(|pt| hit.contains(pt) && p.clip_rect().contains(pt));
+        if hovered && !(m.name.trim().is_empty() && m.comment.trim().is_empty()) {
+            egui::Tooltip::always_open(ctx.clone(), p.layer_id(), egui::Id::unique(("clip-mk", it.id.0, m.id.0)), egui::PopupAnchor::Pointer).show(|ui| {
+                crate::panels::markers_panel::marker_tooltip(ui, m);
+            });
+        }
     }
 }
 

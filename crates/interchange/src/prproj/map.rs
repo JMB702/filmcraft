@@ -494,6 +494,19 @@ impl Map<'_, '_> {
             speed: if c.speed > 0.0 { c.speed } else { 1.0 },
         };
         super::effects::apply(g, ti.components.as_ref(), &mut c, &space, self.report);
+        // Clip markers on this clip's own clip (source time, like the master clip's). Those the
+        // master clip (or nested sequence) already holds show on the clip from there: keep only
+        // the ones it doesn't, so an edit to the master's marker isn't shadowed by a stale copy.
+        let own = self.markers(clip.markers.as_ref());
+        if !own.is_empty() {
+            let master: &[Marker] = match self.b.p.item(item).map(|i| &i.kind) {
+                Some(ItemKind::Media(m)) => &m.markers,
+                Some(ItemKind::Sequence(q)) => &q.markers,
+                _ => &[],
+            };
+            let same = |a: &Marker, b: &Marker| a.start == b.start && a.duration == b.duration && a.name == b.name && a.comment == b.comment;
+            c.markers = own.into_iter().filter(|m| !master.iter().any(|x| same(x, m))).collect();
+        }
         let nested = self.b.p.item(item).and_then(|i| i.as_sequence()).is_some();
         if clip.multicam && nested {
             let angle = clip.angle.and_then(|a| u32::try_from(a).ok()).unwrap_or(0);
