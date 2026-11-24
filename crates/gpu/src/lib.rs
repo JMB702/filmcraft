@@ -90,6 +90,14 @@ pub struct GpuCompositor {
     fx: Option<fx::FxStage>,
     transition: transition::PushStage,
     transition_inputs: [Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>; 2],
+    /// The canvas a nested picture ([`PlanStep::Group`]) is composited on before it is placed.
+    group: Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>,
+    /// The layers being drawn are those of a nested picture ([`SOFT_EDGES`]).
+    soft_edges: bool,
+    /// Groups drawn here, and frames with one that were composited on the CPU instead (the
+    /// effect stage declined its effects).
+    pub gpu_groups: u64,
+    pub cpu_groups: u64,
     pub gpu_transitions: u64,
     pub cpu_transitions: u64,
     /// Adjustment layers ([`PlanStep::Adjust`]) run by the effect stage, and frames with one that
@@ -264,6 +272,7 @@ pub fn prepare(plan: &FramePlan) -> PreparedPlan {
                     PlanStep::Layers(layers) => vec![prepare_layers(layers)],
                     PlanStep::Transition { inputs, .. } => inputs.iter().map(|ls| prepare_layers(ls)).collect(),
                     PlanStep::Adjust { .. } => Vec::new(),
+                    PlanStep::Group(g) => vec![prepare_layers(&g.layers)],
                 })
                 .collect(),
             ..Default::default()
@@ -424,6 +433,10 @@ impl GpuCompositor {
             fx,
             transition: transition::PushStage::new(device),
             transition_inputs: [None, None],
+            group: None,
+            soft_edges: false,
+            gpu_groups: 0,
+            cpu_groups: 0,
             gpu_transitions: 0,
             cpu_transitions: 0,
             gpu_adjustments: 0,
@@ -589,7 +602,7 @@ impl GpuCompositor {
     /// The source description of an uploaded frame.
     /// Whether a source kind is Y'CbCr planes (2: one normalised sample a texel; [`KIND_YUV_CODES`]).
     fn is_yuv(kind: u32) -> bool {
-        kind >= 2
+        kind == 2 || kind == KIND_YUV_CODES
     }
 
     fn src_info(&self, f: &VideoFrame, key: (usize, u32, u32)) -> Option<SrcInfo> {
@@ -757,7 +770,9 @@ impl GpuCompositor {
         } else {
             None
         };
-        let out_view = Self::target(&self.device, &mut self.output, w, h, OUTPUT_FORMAT, wgpu::TextureUsages::COPY_SRC);
+        // (only a pass that resolves needs the output: a nested picture of another size composited
+        // on its own canvas must not have the output made over at its size, and back, every frame)
+        let out_view = resolve.then(|| Self::target(&self.device, &mut self.output, w, h, OUTPUT_FORMAT, wgpu::TextureUsages::COPY_SRC));
         // Layers whose effects the GPU stage can't run (no stage on this device, or a working image
         // larger than a texture) are rendered on the CPU here and drawn as plain RGBA layers.
         let max_side = self.device.limits().max_texture_dimension_2d;
@@ -856,6 +871,10 @@ impl GpuCompositor {
                 }
             };
             jobs.push(job);
+            let mut u = u;
+            if self.soft_edges {
+                nested_uniforms(&mut u);
+            }
             let buf = self.uniform_buffer(&u);
             let mut entries = vec![
                 wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
@@ -928,11 +947,11 @@ impl GpuCompositor {
             }
             i = end;
         }
-        if resolve {
+        if let Some(out_view) = &out_view {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("resolve"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &out_view,
+                    view: out_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
@@ -947,7 +966,7 @@ impl GpuCompositor {
             pass.draw(0..3, 0..1);
         }
         self.queue.submit([enc.finish()]);
-        (if resolve { out_view } else { accum_view }, (w, h))
+        (out_view.unwrap_or(accum_view), (w, h))
     }
 
     fn composite_steps(
@@ -982,7 +1001,7 @@ impl GpuCompositor {
         let mut children = prep.map(|p| p.children.iter());
         // counted once the frame is done on the GPU: a frame that falls back to the CPU half way
         // throws away the steps drawn so far
-        let (mut transitions, mut adjustments) = (0u64, 0u64);
+        let (mut transitions, mut adjustments, mut groups) = (0u64, 0u64, 0u64);
         for step in steps {
             match step {
                 PlanStep::Layers(layers) => {
@@ -1012,10 +1031,30 @@ impl GpuCompositor {
                     }
                     adjustments += 1;
                 }
+                PlanStep::Group(g) => {
+                    let p = children.as_mut().and_then(Iterator::next);
+                    // the nested picture on a canvas of its own (its size, not the frame's)
+                    std::mem::swap(&mut self.accum, &mut self.group);
+                    self.soft_edges = true;
+                    let (nested, size) = self.render_plan(&FramePlan::Layers { width: g.width, height: g.height, layers: g.layers.clone() }, p, true, false);
+                    self.soft_edges = false;
+                    std::mem::swap(&mut self.accum, &mut self.group);
+                    // the clip's effects on it, then the clip's placement on the frame
+                    if !g.ops.is_empty() && self.adjust(&nested, size, &g.ops).is_none() {
+                        if let Some(f) = self.fx.as_mut() {
+                            f.end_frame();
+                        }
+                        self.cpu_groups += 1;
+                        return cpu(self);
+                    }
+                    self.draw_canvas(&canvas, dims, &nested, size, &g.matrix, g.opacity);
+                    groups += 1;
+                }
             }
         }
         self.gpu_transitions += transitions;
         self.gpu_adjustments += adjustments;
+        self.gpu_groups += groups;
         let out = self.render_plan(&empty, None, false, resolve);
         if let Some(f) = self.fx.as_mut() {
             f.end_frame();
@@ -1024,9 +1063,49 @@ impl GpuCompositor {
     }
 
     /// What this device runs, for planning its frames ([`filmcraft_render::plan::plan_frame`]):
-    /// adjustment layers up to its texture limit when it has an effect stage.
+    /// adjustment layers up to its texture limit when it has an effect stage, and nested pictures
+    /// ([`PlanStep::Group`]) up to that limit.
     pub fn caps(&self) -> DeviceCaps {
-        DeviceCaps { adjust_side: if self.fx.is_some() { self.device.limits().max_texture_dimension_2d } else { 0 } }
+        let side = self.device.limits().max_texture_dimension_2d;
+        DeviceCaps { adjust_side: if self.fx.is_some() { side } else { 0 }, group_side: side }
+    }
+
+    /// Draw `src` (linear premultiplied RGBA of `size`, a canvas this compositor rendered) over
+    /// `canvas` (of `dims`) through `m` at `opacity`, in Normal mode: a nested picture placed on
+    /// the frame, sampled as any layer is.
+    fn draw_canvas(
+        &mut self,
+        canvas: &wgpu::TextureView,
+        dims: (u32, u32),
+        src: &wgpu::TextureView,
+        size: (u32, u32),
+        m: &filmcraft_geom::Affine,
+        opacity: f32,
+    ) {
+        let rgba =
+            SrcInfo { kind: 1, code_scale: 1.0, code_levels: 1.0, alpha: 0.0, chroma: size, size, color: filmcraft_color::ColorInfo::SRGB_FULL, input: None };
+        let mut u = Self::uniforms(&rgba, m, opacity, Blend::Normal, dims);
+        nested_uniforms(&mut u);
+        let buf = self.uniform_buffer(&u);
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("group"),
+            layout: &self.layer_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.dummy) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.dummy) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.dummy) },
+            ],
+        });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-group") });
+        {
+            let mut pass = accum_pass(&mut enc, canvas, wgpu::LoadOp::Load);
+            pass.set_pipeline(&self.layer_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..6, 0..1);
+        }
+        self.queue.submit([enc.finish()]);
     }
 
     /// The adjustment layer `ops` on the accumulator (`canvas`, of size `w`×`h`): it is drawn
@@ -1320,6 +1399,28 @@ pub(crate) fn copy_mapped(src: &[u8], line: &mut Vec<u8>) {
 /// A source kind (`SrcInfo::kind`, the shader's `u.p0.y`): Y'CbCr planes of 9 to 16 bits whose
 /// texels hold the code's two bytes (`code_bytes`), which the shader reads as the code itself.
 const KIND_YUV_CODES: u32 = 3;
+
+/// Added to the source kind in a layer's uniforms (index [`KIND_SLOT`]): the layer has nothing
+/// around it, as the CPU places an image (`coverage` in `composite.wgsl`), instead of ending hard
+/// at its quad. Set for the layers of a nested picture and for that picture placed on the frame.
+const SOFT_EDGES: f32 = 8.0;
+const KIND_SLOT: usize = 13;
+const TAPS_SLOT: usize = 14;
+const FOOTPRINT_SLOT: usize = 23;
+
+/// Make a layer's uniforms those of a layer of a nested picture: soft edges ([`SOFT_EDGES`]), and
+/// one bilinear sample while it is reduced by less than 2, as `Image::transformed` places an image
+/// on the CPU (other layers are supersampled from a reduction of 1.25 on).
+fn nested_uniforms(u: &mut [f32; UNIFORM_FLOATS]) {
+    if let Some(kind) = u.get_mut(KIND_SLOT) {
+        *kind += SOFT_EDGES;
+    }
+    if u.get(FOOTPRINT_SLOT).is_some_and(|f| *f < 2.0)
+        && let Some(taps) = u.get_mut(TAPS_SLOT)
+    {
+        *taps = 1.0;
+    }
+}
 
 struct SrcInfo {
     /// 0: sRGB RGBA8, straight alpha. 1: linear premultiplied RGBA16F. 2: 8-bit Y'CbCr planes.

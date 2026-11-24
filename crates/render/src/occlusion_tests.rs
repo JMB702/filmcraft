@@ -324,3 +324,25 @@ fn a_clip_scaled_to_fill_the_frame_covers_it_in_the_plan() {
     r.set(seq, clips[1], "motion", "scale", float(200.0));
     assert_eq!(plan(&r, seq), [0, 0, 1]);
 }
+
+/// A punch-in on a multi-camera clip (a group in the plan) still hides the track under it, and a
+/// shrunk one does not.
+#[test]
+fn a_punch_in_on_a_multicam_clip_hides_the_track_under_it() {
+    let mut r = Rig::new();
+    let (below, a, b) = (r.camera(20), r.camera(120), r.camera(200));
+    let (source, _) = r.seq(&[a, b]);
+    let (seq, clips) = r.seq(&[below, source]);
+    r.clip(seq, clips[1]).multicam = Some(MulticamSel { enabled: true, angle: 1 });
+    r.set(seq, clips[1], "motion", "scale", float(125.0));
+    let (cpu, plan, _) = r.check(seq);
+    assert_eq!((cpu, plan), (vec![0, 0, 1], vec![0, 0, 1]));
+    let planned = plan::plan_frame(&r.p, seq, RATE.tick_of(3), Rig::opts(true), plan::DeviceCaps::ALL, &r.map);
+    assert!(
+        matches!(&planned, plan::FramePlan::Composite { steps, .. } if matches!(steps.as_slice(), [plan::PlanStep::Group(_)])),
+        "one group, nothing under it"
+    );
+    r.set(seq, clips[1], "motion", "scale", float(60.0));
+    let (cpu, plan, _) = r.check(seq);
+    assert_eq!((cpu, plan), (vec![1, 0, 1], vec![1, 0, 1]));
+}

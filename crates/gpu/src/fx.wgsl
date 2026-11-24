@@ -55,6 +55,7 @@ const OP_BOKEH_BOOST: u32 = 33u;
 const OP_BOKEH: u32 = 34u;
 const OP_BOKEH_UP: u32 = 35u;
 const OP_THREE_WAY: u32 = 36u;
+const OP_NOISE: u32 = 37u;
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -392,6 +393,41 @@ fn limit_video(v: vec3<f32>, max_val: f32, comp: f32, axis: u32) -> vec3<f32> {
 
     let out_rgb = to_rgb_709(y, cb, cr);
     return clamp(out_rgb, vec3(0.0), vec3(max_val));
+}
+
+// ---- Noise: the CPU's 64-bit pixel hash (`effects::hash3`), on 32-bit halves (low, high).
+
+// Full 64-bit product of two u32.
+fn mul32(a: u32, b: u32) -> vec2<u32> {
+    let a0 = a & 0xffffu; let a1 = a >> 16u; let b0 = b & 0xffffu; let b1 = b >> 16u;
+    let p00 = a0 * b0; let p01 = a0 * b1; let p10 = a1 * b0; let p11 = a1 * b1;
+    let mid = (p00 >> 16u) + (p01 & 0xffffu) + (p10 & 0xffffu);
+    return vec2((mid << 16u) | (p00 & 0xffffu), p11 + (p01 >> 16u) + (p10 >> 16u) + (mid >> 16u));
+}
+
+// Wrapping 64-bit multiply.
+fn mul64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+    let p = mul32(a.x, b.x);
+    return vec2(p.x, p.y + a.x * b.y + a.y * b.x);
+}
+
+// 64-bit shift right by 0 < n < 32.
+fn shr64(a: vec2<u32>, n: u32) -> vec2<u32> {
+    return vec2((a.x >> n) | (a.y << (32u - n)), a.y >> n);
+}
+
+// Wrapping 64-bit add of a u32.
+fn add64(a: vec2<u32>, k: u32) -> vec2<u32> {
+    let lo = a.x + k;
+    return vec2(lo, a.y + u32(lo < a.x));
+}
+
+fn hash3(p: vec2<u32>, z: vec2<u32>) -> f32 {
+    var h = mul64(vec2(p.x, 0u), vec2(0x7F4A7C15u, 0x9E3779B9u)) ^ mul64(vec2(p.y, 0u), vec2(0x27D4EB4Fu, 0xC2B2AE3Du)) ^ mul64(z, vec2(0x9E3779F9u, 0x165667B1u));
+    h = h ^ shr64(h, 31u);
+    h = mul64(h, vec2(0x1CE4E5B9u, 0xBF58476Du));
+    h = h ^ shr64(h, 29u);
+    return f32(h.y >> 8u) / 16777216.0;
 }
 
 // ---- per-pixel colour effects on straight colour (`Image::map_rgb`)
@@ -831,6 +867,26 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             let c = o.rgb / a;
             let res = lumetri_op(c, p);
             return vec4(res * a, a);
+        }
+        case OP_NOISE: {
+            // `effects::noise`: i1 = seed (low, high), flags (1: a value per channel, 2: clip)
+            let o = ld(p);
+            let a = o.a;
+            if a <= 0.0 {
+                return o;
+            }
+            let seed = u.i1.xy;
+            let xy = vec2<u32>(p);
+            let n0 = hash3(xy, seed) - 0.5;
+            var ns = vec3(n0);
+            if (u.i1.z & 1u) != 0u {
+                ns = vec3(n0, hash3(xy, add64(seed, 7777u)) - 0.5, hash3(xy, add64(seed, 99991u)) - 0.5);
+            }
+            var c = enc(o.rgb / a) + ns * u.p0.x;
+            if (u.i1.z & 2u) != 0u {
+                c = clamp(c, vec3(0.0), vec3(1.0));
+            }
+            return vec4(dec(c) * a, a);
         }
         default: {
             let o = ld(p);

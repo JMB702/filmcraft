@@ -57,6 +57,7 @@ const OP_BOKEH_BOOST: u32 = 33;
 const OP_BOKEH: u32 = 34;
 const OP_BOKEH_UP: u32 = 35;
 const OP_THREE_WAY: u32 = 36;
+const OP_NOISE: u32 = 37;
 
 type Target = (wgpu::Texture, wgpu::TextureView);
 
@@ -165,6 +166,10 @@ fn steps(op: &FxOp, w: u32, h: u32) -> Vec<Step> {
         FxOp::ProcAmp { br, co, hue, sat } => out.push(step(OP_PROC_AMP, [0; 4], &[*br, *co, *hue, *sat])),
         FxOp::Tint { black, white, amount } => {
             out.push(step(OP_TINT, [0; 4], &[black[0], black[1], black[2], *amount, white[0], white[1], white[2]]));
+        }
+        // the seed's two halves; bit 0: a value per channel, bit 1: clip
+        FxOp::Noise { amount, colored, clip, seed } => {
+            out.push(step(OP_NOISE, [*seed as u32, (*seed >> 32) as u32, *colored as u32 | (*clip as u32) << 1, 0], &[*amount]));
         }
         FxOp::BlackWhite => out.push(step(OP_BLACK_WHITE, [0; 4], &[])),
         FxOp::ColorBalance { sh, md, hi, preserve } => {

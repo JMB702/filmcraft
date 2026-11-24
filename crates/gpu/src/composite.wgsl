@@ -11,7 +11,7 @@ struct U {
     m0: vec4<f32>,   // a b c d
     m1: vec4<f32>,   // e f out_w out_h
     src: vec4<f32>,  // src_w src_h chroma_w chroma_h
-    p0: vec4<f32>,   // opacity, kind (0 rgba8 srgb straight, 1 rgba16f premul linear, 2 yuv, 3 yuv as two-byte codes), taps, transfer (0 srgb, 1 linear, 2 pq, 3 hlg)
+    p0: vec4<f32>,   // opacity, kind (0 rgba8 srgb straight, 1 rgba16f premul linear, 2 yuv, 3 yuv as two-byte codes; + 8: soft edges), taps, transfer (0 srgb, 1 linear, 2 pq, 3 hlg)
     p1: vec4<f32>,   // y_off y_scale c_off c_scale (code units)
     p2: vec4<f32>,   // kr kb code_scale footprint
     p3: vec4<f32>,   // blend mode, alpha-plane scale (0: none), effect-source integer decimation, effect-source quarter turns
@@ -42,7 +42,12 @@ struct VOut {
 fn vs(@builtin(vertex_index) vi: u32) -> VOut {
     var corners = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
     let c = corners[vi];
-    let s = c * u.src.xy;
+    var s = c * u.src.xy;
+    if u.p0.y > 7.5 {
+        // soft edges (`coverage`): the picture fades out over the texel around it, so its quad is
+        // a texel larger all round
+        s = c * (u.src.xy + vec2(2.0)) - vec2(1.0);
+    }
     let o = vec2(u.m0.x * s.x + u.m0.z * s.y + u.m1.x, u.m0.y * s.x + u.m0.w * s.y + u.m1.y);
     var out: VOut;
     out.pos = vec4(o.x / u.m1.z * 2.0 - 1.0, 1.0 - o.y / u.m1.w * 2.0, 0.0, 1.0);
@@ -168,12 +173,37 @@ fn managed(rgb: vec3<f32>) -> vec3<f32> {
     return c;
 }
 
+// The source kind (`u.p0.y` without the soft-edge flag: 8 is added to it for a layer of a nested
+// picture, see `coverage`).
+fn kind_of() -> u32 {
+    return u32(u.p0.y) & 7u;
+}
+
+fn soft_edges() -> bool {
+    return u.p0.y > 7.5;
+}
+
+// How much of a bilinear sample at source position p lies inside the picture: 1 inside, falling
+// to 0 over the texel around its edge. The CPU renderer places an image with nothing around it
+// (`Image::sample_bilinear`: transparent outside), where a layer's quad here repeats its edge
+// texels and ends hard. Multiplying the edge-repeating sample by this gives the CPU's sample
+// exactly, so a nested picture composited here (`PlanStep::Group`) has the edges the CPU gives it:
+// both its own layers on their canvas and the canvas placed on the frame.
+fn coverage(p: vec2<f32>) -> f32 {
+    var q = p - 0.5;
+    let rq = round(q);
+    if abs(q.x - rq.x) < 1e-4 { q.x = rq.x; }
+    if abs(q.y - rq.y) < 1e-4 { q.y = rq.y; }
+    let c = clamp(min(q + 1.0, u.src.xy - q), vec2(0.0), vec2(1.0));
+    return c.x * c.y;
+}
+
 // One texel of a Y'CbCr plane. Planes of more than 8 bits hold each code's two bytes (kind 3: low
 // byte in red, high byte in green), put back together here: the code itself, exact, where a
 // half-float texel could only hold 11 of its bits.
 fn tap(t: texture_2d<f32>, i: vec2<i32>) -> f32 {
     let v = textureLoad(t, i, 0);
-    if u.p0.y > 2.5 {
+    if kind_of() == 3u {
         return floor(v.r * 255.0 + 0.5) + floor(v.g * 255.0 + 0.5) * 256.0;
     }
     return v.r;
@@ -197,7 +227,16 @@ fn load1(t: texture_2d<f32>, p: vec2<f32>) -> f32 {
 
 // One linear premultiplied sample at source position p.
 fn sample(p: vec2<f32>) -> vec4<f32> {
-    let kind = u32(u.p0.y);
+    let c = sample_repeat(p);
+    if soft_edges() {
+        return c * coverage(p);
+    }
+    return c;
+}
+
+// `sample` with the picture's edge texels repeated around it.
+fn sample_repeat(p: vec2<f32>) -> vec4<f32> {
+    let kind = kind_of();
     if kind == 0u {
         // rgba8 sRGB texture: loads are already linear, straight alpha
         let c = load4(tex0, p);

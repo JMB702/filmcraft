@@ -112,12 +112,19 @@ const EDGE: f64 = 1e-3;
 /// Whether a `size` picture placed by `m` (its pixels to output pixels) covers the centre of
 /// every pixel of a `w`×`h` output. The four corner pixels decide it: the placement is affine.
 pub(crate) fn covers(size: (u32, u32), m: &Affine, w: usize, h: usize) -> bool {
+    covers_within(size, m, w, h, EDGE)
+}
+
+/// [`covers`] for a picture that fades into transparency over its outermost half pixel (a nested
+/// picture placed as a group: it is sampled with nothing around it, on both renderers): every
+/// output pixel's centre has to land at least `inset` picture pixels inside it.
+pub(crate) fn covers_within(size: (u32, u32), m: &Affine, w: usize, h: usize, inset: f64) -> bool {
     let Some(inv) = m.inverse() else { return false };
     let (sw, sh) = (f64::from(size.0), f64::from(size.1));
     let (x1, y1) = (w as f64 - 0.5, h as f64 - 0.5);
     [(0.5, 0.5), (x1, 0.5), (0.5, y1), (x1, y1)].into_iter().all(|(x, y)| {
         let p = inv.apply(Vec2::new(x, y));
-        p.x >= EDGE && p.x <= sw - EDGE && p.y >= EDGE && p.y <= sh - EDGE
+        p.x >= inset && p.x <= sw - inset && p.y >= inset && p.y <= sh - inset
     })
 }
 

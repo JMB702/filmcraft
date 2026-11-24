@@ -78,9 +78,10 @@ impl RendererPool {
     /// `None` for an empty list (a pool nobody could take from).
     fn new(renderers: Vec<Box<dyn FrameRenderer>>) -> Option<Self> {
         let adjust_side = renderers.iter().map(|r| r.caps().adjust_side).min()?;
+        let group_side = renderers.iter().map(|r| r.caps().group_side).min()?;
         Some(Self {
             capacity: renderers.len(),
-            caps: filmcraft_render::plan::DeviceCaps { adjust_side },
+            caps: filmcraft_render::plan::DeviceCaps { adjust_side, group_side },
             renderers: std::sync::Mutex::new(renderers),
             available: std::sync::Condvar::new(),
             failed: std::sync::atomic::AtomicBool::new(false),
