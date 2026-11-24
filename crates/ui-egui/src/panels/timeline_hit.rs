@@ -404,6 +404,7 @@ pub(crate) mod tests {
             split_y: TOP + 60.0,
             v_scroll: 0.0,
             a_scroll: 0.0,
+            panes: Default::default(),
         };
         (seq, layout, track)
     }

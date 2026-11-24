@@ -118,6 +118,12 @@ pub(super) fn move_transition_preview(app: &FilmcraftApp, seq: &Sequence, trn: &
 }
 
 impl MarqueeAnchor {
+    /// Where the corner's spot on its track is on screen now, scrolled out of sight or not.
+    pub(super) fn y_now(&self, layout: &Layout) -> f32 {
+        // the video tracks move down as `v_scroll` grows, the audio tracks up as `a_scroll` grows
+        if self.video { self.y + (layout.v_scroll - self.scroll) } else { self.y - (layout.a_scroll - self.scroll) }
+    }
+
     pub(super) fn new(layout: &Layout, t: Tick, (v_scroll, a_scroll): (f32, f32), p: Pos2) -> Self {
         let video = p.y < layout.split_y;
         MarqueeAnchor { t, y: p.y, scroll: if video { v_scroll } else { a_scroll }, video }
@@ -126,8 +132,7 @@ impl MarqueeAnchor {
     /// The box from this corner, wherever it is on screen now, to the pointer at `p`. It follows
     /// the rows as `layout` placed them, not the view's scroll a wheel turn has already changed.
     pub(super) fn rect_to(&self, layout: &Layout, p: Pos2) -> Rect {
-        // the video tracks move down as `v_scroll` grows, the audio tracks up as `a_scroll` grows
-        let mut y = if self.video { self.y + (layout.v_scroll - self.scroll) } else { self.y - (layout.a_scroll - self.scroll) };
+        let mut y = self.y_now(layout);
         // video scrolling away under a pointer that is still over the video area must not reach into the audio rows
         if self.video && p.y < layout.split_y {
             y = y.min(layout.split_y - 1.0);
@@ -140,15 +145,45 @@ impl MarqueeAnchor {
     }
 }
 
-/// The clips a marquee rectangle touches, on the tracks it crosses.
-fn marquee_clips(seq: &Sequence, layout: &Layout, r: Rect) -> Vec<ClipId> {
-    let (a, b) = (layout.tick_at(r.min.x), layout.tick_at(r.max.x));
+/// The clips a marquee from `anchor` to the pointer at `p` takes: those in its time span on the
+/// tracks between the track it started on and the track under the pointer. Worked out by track,
+/// not by what the box covers on screen, so a drag that scrolls the tracks keeps the track it
+/// started on (now scrolled out of sight) and takes the tracks scrolled in between. A track of
+/// the other pane counts only once the pointer is over that pane (its tracks scrolled under this
+/// pane stay out, #2978), and a track still outside the pane, past where the pointer went, waits
+/// until it scrolls in.
+fn marquee_clips(seq: &Sequence, layout: &Layout, anchor: &MarqueeAnchor, p: Pos2) -> Vec<ClipId> {
+    let (a, b) = {
+        let (x0, x1) = (layout.tick_at(p.x), anchor.t);
+        (x0.min(x1), x0.max(x1))
+    };
+    let panes = layout.panes;
+    // the pointer as far as the panes go: rows beyond the panes' outer edges are not in view yet
+    let py = if panes.audio_bottom > panes.video_top { p.y.clamp(panes.video_top, panes.audio_bottom) } else { p.y };
+    let ya = anchor.y_now(layout);
+    let pointer_video = p.y < layout.split_y;
+    let own = if anchor.video { TrackKind::Video } else { TrackKind::Audio };
+    // the stretch of the anchor's own pane: from the anchor to the pointer, or to the divider (and
+    // past it, through rows scrolled under the other pane) once the pointer has crossed it
+    let (lo, hi) = match (anchor.video, pointer_video) {
+        (true, false) => (ya, f32::INFINITY),
+        (false, true) => (f32::NEG_INFINITY, ya),
+        _ => (ya.min(py), ya.max(py)),
+    };
     layout
         .rows
         .iter()
         .filter(|row| {
-            let s = layout.shown(row);
-            s.height() > 0.0 && s.intersects(r)
+            let r = row.rect;
+            if row.kind == own {
+                if lo == hi { r.min.y <= lo && r.max.y > lo } else { r.min.y < hi && r.max.y > lo }
+            } else if anchor.video {
+                // audio rows from A1 (scrolled out above the pane or not) down to the pointer
+                !pointer_video && r.min.y < py
+            } else {
+                // video rows from the pointer down to V1 (scrolled under the divider or not)
+                pointer_video && r.max.y > py
+            }
         })
         .filter_map(|row| seq.track(row.track))
         .flat_map(|tr| tr.items.iter().filter(|i| i.start < b && i.end() > a).map(|i| i.id))
@@ -690,8 +725,10 @@ fn drag_update(app: &mut FilmcraftApp, ui: &mut egui::Ui, resp: &egui::Response,
                 let s1 = snap(app, seq, layout, first + raw, &clips) - first;
                 let offset = if s1 != raw { s1 } else { snap(app, seq, layout, last + raw, &clips) - last };
                 let offset = offset.max(-first);
-                let cur_row = layout.row_at(p.y);
                 let start_row = layout.rows.iter().find(|r| r.track == start_track);
+                // past the top of the video tracks or the bottom of the audio tracks (where the
+                // drag scrolls them) the clips go to the edge track, not back to their own
+                let cur_row = layout.row_at(start_row.map_or(p.y, |s| layout.y_in_pane(s.kind, p.y)));
                 let track_delta = match (cur_row, start_row) {
                     (Some(c), Some(s)) if c.kind == s.kind => c.index as i32 - s.index as i32,
                     _ => 0,
@@ -773,7 +810,7 @@ fn drag_update(app: &mut FilmcraftApp, ui: &mut egui::Ui, resp: &egui::Response,
                 // the clips in the box are selected as it grows and shrinks; only the release runs
                 // the command, so the drag is one selection change
                 let mut sel = if add { before.clone() } else { Vec::new() };
-                let clips = marquee_clips(seq, layout, r);
+                let clips = marquee_clips(seq, layout, &start, p);
                 let clips = if individual { clips } else { filmcraft_engine::commands::with_links(&app.session, &clips) };
                 for c in clips {
                     if !sel.contains(&c) {
@@ -808,15 +845,42 @@ fn drag_update(app: &mut FilmcraftApp, ui: &mut egui::Ui, resp: &egui::Response,
             ctx.set_cursor_icon(CursorIcon::ResizeColumn);
         }
         // auto-scroll when dragging near the edges
+        let mut scrolled = false;
         if !matches!(app.tl.drag, Some(Drag::Pan { .. }) | Some(Drag::ZoomBar { .. }) | Some(Drag::Volume(_))) {
             let v = &mut app.ui.timeline;
             if p.x > layout.content.max.x - 20.0 {
                 v.target_scroll += 6.0 / v.pps;
                 v.scroll = v.target_scroll;
+                scrolled = true;
             } else if p.x < layout.content.min.x + 10.0 && v.scroll > 0.0 {
                 v.target_scroll = (v.target_scroll - 6.0 / v.pps).max(0.0);
                 v.scroll = v.target_scroll;
+                scrolled = true;
             }
+        }
+        // and up and down: a marquee or a clip move held near (or past) the top of the video
+        // tracks or the bottom of the audio tracks brings the tracks beyond into view, as in
+        // Premiere Pro. Trims and the rest only move in time, so they don't scroll the tracks.
+        let pane = match &app.tl.drag {
+            Some(Drag::Marquee { start, .. }) => Some((if start.video { TrackKind::Video } else { TrackKind::Audio }, true)),
+            Some(Drag::Move { start_track, .. }) => layout.rows.iter().find(|r| r.track == *start_track).map(|r| (r.kind, false)),
+            _ => None,
+        };
+        if let Some((own, cross)) = pane {
+            let (dv, da) = layout.edge_scroll_rates(p.y, own, cross);
+            if dv != 0.0 || da != 0.0 {
+                // the frame's length, so the speed does not depend on the frame rate
+                let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1);
+                let v = &mut app.ui.timeline;
+                let panes = layout.panes;
+                v.v_scroll = (v.v_scroll + dv * dt).clamp(0.0, panes.max_v_scroll.max(0.0));
+                v.a_scroll = (v.a_scroll + da * dt).clamp(0.0, panes.max_a_scroll.max(0.0));
+                scrolled = true;
+            }
+        }
+        // a pointer held still at an edge sends no events: keep the frames coming while it scrolls
+        if scrolled {
+            ctx.request_repaint();
         }
     }
 }
@@ -872,7 +936,7 @@ fn commit_drag(app: &mut FilmcraftApp, ctx: &egui::Context, resp: &egui::Respons
                     match resp.interact_pointer_pos() {
                         Some(end) if !ctx.input(|i| i.key_pressed(egui::Key::Escape)) => {
                             let r = start.rect_to(layout, end);
-                            let ids: Vec<u64> = marquee_clips(seq, layout, r).iter().map(|c| c.0).collect();
+                            let ids: Vec<u64> = marquee_clips(seq, layout, &start, end).iter().map(|c| c.0).collect();
                             let caps: Vec<u64> = crate::panels::timeline_captions::marquee_captions(seq, layout, r).iter().map(|c| c.0).collect();
                             let res = app.session.execute("timeline.select", json!({"clips": ids, "add": add, "linked": !individual}));
                             // the captions the box touched join whatever the clip selection left
@@ -1440,7 +1504,7 @@ mod marquee_tests {
     fn layout(v_scroll: f32, a_scroll: f32) -> Layout {
         let content = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 600.0));
         let ruler = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 20.0));
-        Layout { content, ruler, rows: Vec::new(), pps: 100.0, scroll: 0.0, split_y: 300.0, v_scroll, a_scroll }
+        Layout { content, ruler, rows: Vec::new(), pps: 100.0, scroll: 0.0, split_y: 300.0, v_scroll, a_scroll, panes: Default::default() }
     }
 
     /// #2978: V1 scrolled down under the audio tracks, behind A1. A box drawn on A1 takes A1's
@@ -1458,8 +1522,95 @@ mod marquee_tests {
             Row { track: seq.video_tracks[0].id, kind: TrackKind::Video, index: 0, rect: band, lane: false },
             Row { track: seq.audio_tracks[0].id, kind: TrackKind::Audio, index: 0, rect: band, lane: false },
         ];
-        let picked = marquee_clips(&seq, &l, Rect::from_min_max(pos2(150.0, 330.0), pos2(250.0, 360.0)));
+        let anchor = MarqueeAnchor::new(&l, l.tick_at(150.0), (0.0, 0.0), pos2(150.0, 330.0));
+        let picked = marquee_clips(&seq, &l, &anchor, pos2(250.0, 360.0));
         assert_eq!(picked, vec![ClipId(2)]);
+    }
+
+    /// Two video and three audio tracks with a clip each (clip id = track number: V1 1, V2 2,
+    /// A1 11, A2 12, A3 13), laid out 100 high at the given scrolls: the video pane is 0..300
+    /// (V1 at 200..300 unscrolled), the audio pane 305..505 (A1 at 305, A3 below the pane).
+    fn tracks(v_scroll: f32, a_scroll: f32) -> (Sequence, Layout) {
+        let mut p = filmcraft_project::Project::new("t");
+        let id = p.new_sequence("s", filmcraft_project::SequenceSettings::default(), 2, 3, None);
+        let mut seq = p.sequence(id).cloned().expect("sequence");
+        let mut l = layout(v_scroll, a_scroll);
+        l.panes = super::super::layout::Panes { video_top: 0.0, audio_bottom: 505.0, max_v_scroll: 100.0, max_a_scroll: 100.0 };
+        for (i, tr) in seq.video_tracks.iter_mut().enumerate() {
+            tr.items = vec![crate::panels::timeline_hit::tests::clip(1 + i as u64, 100.0, 300.0)];
+            let top = 200.0 - i as f32 * 100.0 + v_scroll;
+            l.rows.push(Row {
+                track: tr.id,
+                kind: TrackKind::Video,
+                index: i,
+                rect: Rect::from_min_max(pos2(0.0, top), pos2(1000.0, top + 100.0)),
+                lane: false,
+            });
+        }
+        for (i, tr) in seq.audio_tracks.iter_mut().enumerate() {
+            tr.items = vec![crate::panels::timeline_hit::tests::clip(11 + i as u64, 100.0, 300.0)];
+            let top = 305.0 + i as f32 * 100.0 - a_scroll;
+            l.rows.push(Row {
+                track: tr.id,
+                kind: TrackKind::Audio,
+                index: i,
+                rect: Rect::from_min_max(pos2(0.0, top), pos2(1000.0, top + 100.0)),
+                lane: false,
+            });
+        }
+        (seq, l)
+    }
+
+    fn sorted(mut v: Vec<ClipId>) -> Vec<u64> {
+        v.sort();
+        v.into_iter().map(|c| c.0).collect()
+    }
+
+    /// A box started on A1 and dragged past the bottom while the audio tracks scrolled down keeps
+    /// A1 (now above the pane) and takes A3 once it has scrolled in.
+    #[test]
+    fn an_audio_box_keeps_its_track_and_takes_tracks_scrolled_in() {
+        let (seq, l0) = tracks(0.0, 0.0);
+        let anchor = MarqueeAnchor::new(&l0, l0.tick_at(150.0), (0.0, 0.0), pos2(150.0, 320.0));
+        // pointer past the bottom before scrolling: A1 and A2 only, A3 is still out of view
+        assert_eq!(sorted(marquee_clips(&seq, &l0, &anchor, pos2(250.0, 560.0))), vec![11, 12]);
+        let (_, l1) = tracks(0.0, 100.0);
+        assert_eq!(sorted(marquee_clips(&seq, &l1, &anchor, pos2(250.0, 560.0))), vec![11, 12, 13], "A1 scrolled away stays, A3 joins");
+    }
+
+    /// A box started on V1 and dragged above the top while the video tracks scrolled up keeps V1
+    /// (now under the divider) and takes V2 as it comes in; nothing from the audio tracks.
+    #[test]
+    fn a_video_box_keeps_its_track_and_takes_tracks_scrolled_in() {
+        let (seq, l0) = tracks(0.0, 0.0);
+        let anchor = MarqueeAnchor::new(&l0, l0.tick_at(150.0), (0.0, 0.0), pos2(150.0, 250.0));
+        let (_, l1) = tracks(100.0, 0.0);
+        assert_eq!(sorted(marquee_clips(&seq, &l1, &anchor, pos2(250.0, -40.0))), vec![1, 2]);
+        // and into the audio tracks: V1 down, then A1 and A2 under the pointer
+        assert_eq!(sorted(marquee_clips(&seq, &l0, &anchor, pos2(250.0, 450.0))), vec![1, 11, 12]);
+    }
+
+    #[test]
+    fn edges_scroll_faster_the_farther_the_pointer_goes_and_stop_at_the_ends() {
+        let (_, l) = tracks(0.0, 0.0);
+        let (_, a_in) = l.edge_scroll_rates(500.0, TrackKind::Audio, true);
+        let (_, a_past) = l.edge_scroll_rates(600.0, TrackKind::Audio, true);
+        assert!(a_in > 0.0 && a_past > a_in, "down past the audio bottom: {a_in} {a_past}");
+        assert_eq!(l.edge_scroll_rates(400.0, TrackKind::Audio, true), (0.0, 0.0), "the middle of a pane");
+        let (v_top, _) = l.edge_scroll_rates(-30.0, TrackKind::Video, true);
+        assert!(v_top > 0.0, "up past the video top shows higher tracks");
+        assert_eq!(l.edge_scroll_rates(-30.0, TrackKind::Audio, false).0, 0.0, "an audio clip move leaves the video tracks alone");
+        // at the end already: nothing to scroll
+        let (_, end) = tracks(100.0, 100.0);
+        assert_eq!(end.edge_scroll_rates(600.0, TrackKind::Audio, true), (0.0, 0.0));
+        assert_eq!(end.edge_scroll_rates(-30.0, TrackKind::Video, true), (0.0, 0.0));
+        // back the other way at the divider, for the pane the drag began in
+        let (dv, _) = end.edge_scroll_rates(295.0, TrackKind::Video, true);
+        assert!(dv < 0.0, "toward V1: {dv}");
+        let (_, da) = end.edge_scroll_rates(310.0, TrackKind::Audio, true);
+        assert!(da < 0.0, "toward A1: {da}");
+        assert_eq!(end.edge_scroll_rates(310.0, TrackKind::Video, true).0, 0.0, "a video drag crossing into the audio tracks");
+        assert_eq!(l.edge_scroll_rates(f32::NAN, TrackKind::Video, true), (0.0, 0.0));
     }
 
     /// Review of #3583: a video corner scrolled down past the divider, with the pointer still over the
