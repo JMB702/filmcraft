@@ -44,9 +44,8 @@ pub(super) fn preview_drag(
                 edited.insert(*clip, e);
             }
         }
-        Drag::Trim { clip, edge, delta, linked, .. } => {
-            let ids = if *linked { filmcraft_engine::commands::with_links(&app.session, &[*clip]) } else { vec![*clip] };
-            for c in ids {
+        Drag::Trim { clip, edge, delta, linked, others, .. } => {
+            for c in filmcraft_engine::commands::trim_members(&app.session, *clip, others, *linked) {
                 if let Some((_, it)) = seq.find_item(c) {
                     moved(it, *edge, *delta);
                 }
@@ -188,6 +187,60 @@ fn marquee_clips(seq: &Sequence, layout: &Layout, anchor: &MarqueeAnchor, p: Pos
         .filter_map(|row| seq.track(row.track))
         .flat_map(|tr| tr.items.iter().filter(|i| i.start < b && i.end() > a).map(|i| i.id))
         .collect()
+}
+
+/// The other clips whose `edge` trims along when `clip`'s edge is dragged: the other selected
+/// clips when `clip` is selected, and the other selected edit points of the same side and kind when
+/// `clip`'s edge is one of them. Not `clip`'s own linked partners (`linked` decides those), nor
+/// clips on locked tracks. A ripple keeps one edge per track: a clip whose track (or whose linked
+/// partner's track) already ripples is left out.
+pub(super) fn trim_others(
+    session: &filmcraft_engine::Session,
+    seq: &Sequence,
+    clip: ClipId,
+    edge: filmcraft_edit::Edge,
+    mode: filmcraft_edit::TrimMode,
+    linked: bool,
+) -> Vec<ClipId> {
+    use filmcraft_engine::commands::{trim_members, with_links};
+    use filmcraft_engine::trim::TrimKind;
+    let st = &session.state;
+    let mut picked: Vec<ClipId> = Vec::new();
+    if st.selection.contains(&clip) {
+        picked.extend(st.selection.iter().copied());
+    }
+    let out = edge == filmcraft_edit::Edge::Out;
+    let kind = if mode == filmcraft_edit::TrimMode::Ripple { TrimKind::Ripple } else { TrimKind::Trim };
+    if st.edit_points.iter().any(|e| e.clip == clip && e.out == out) {
+        picked.extend(st.edit_points.iter().filter(|e| e.out == out && e.kind == kind).map(|e| e.clip));
+    }
+    let own = with_links(session, &[clip]);
+    let unlocked = |c: &ClipId| seq.find_item(*c).is_some_and(|(t, _)| seq.track(t).is_some_and(|tr| !tr.locked));
+    let mut others: Vec<ClipId> = Vec::new();
+    for c in picked {
+        if !own.contains(&c) && !others.contains(&c) && unlocked(&c) {
+            others.push(c);
+        }
+    }
+    if mode != filmcraft_edit::TrimMode::Ripple {
+        return others;
+    }
+    let tracks_of = |cs: &[ClipId]| -> Vec<TrackId> { cs.iter().filter_map(|c| seq.find_item(*c).map(|(t, _)| t)).collect() };
+    let mut used = tracks_of(&trim_members(session, clip, &[], linked));
+    let mut kept = Vec::new();
+    for c in others {
+        // already rippling as a partner of a kept clip
+        if trim_members(session, clip, &kept, linked).contains(&c) {
+            continue;
+        }
+        let tracks = tracks_of(&trim_members(session, c, &[], linked));
+        if tracks.iter().enumerate().any(|(i, t)| used.contains(t) || tracks[..i].contains(t)) {
+            continue;
+        }
+        used.extend(tracks);
+        kept.push(c);
+    }
+    kept
 }
 
 /// A move previews the same track-lock restrictions as its eventual edit.
@@ -535,8 +588,16 @@ fn start_drag(
             None
         }
         (_, Grab::Edge { clip, edge, kind, .. }) => Some(match kind {
-            EdgeKind::Trim => Drag::Trim { clip, edge, mode: filmcraft_edit::TrimMode::Regular, delta: Tick::ZERO, from: t, linked: !mods.alt },
-            EdgeKind::Ripple => Drag::Trim { clip, edge, mode: filmcraft_edit::TrimMode::Ripple, delta: Tick::ZERO, from: t, linked: !mods.alt },
+            EdgeKind::Trim => {
+                let mode = filmcraft_edit::TrimMode::Regular;
+                let others = trim_others(&app.session, seq, clip, edge, mode, !mods.alt);
+                Drag::Trim { clip, edge, mode, delta: Tick::ZERO, from: t, linked: !mods.alt, others }
+            }
+            EdgeKind::Ripple => {
+                let mode = filmcraft_edit::TrimMode::Ripple;
+                let others = trim_others(&app.session, seq, clip, edge, mode, !mods.alt);
+                Drag::Trim { clip, edge, mode, delta: Tick::ZERO, from: t, linked: !mods.alt, others }
+            }
             EdgeKind::Roll { left, right } => Drag::Roll { left, right, delta: Tick::ZERO, from: t },
             EdgeKind::Stretch => Drag::Stretch { clip, edge, delta: Tick::ZERO, from: t, linked: !mods.alt },
             EdgeKind::Remix => Drag::Remix { clip, delta: Tick::ZERO, from: t },
@@ -747,12 +808,17 @@ fn drag_update(app: &mut FilmcraftApp, ui: &mut egui::Ui, resp: &egui::Response,
                     Some(Drag::Move { clips, grab_tick, start_track, offset, track_delta, new_track, copy: mods.alt })
                 }
             }
-            Drag::Trim { clip, edge, mode, from, linked, .. } => seq.find_item(clip).map(|(_, it)| {
+            Drag::Trim { clip, edge, mode, from, linked, others, .. } => seq.find_item(clip).map(|(_, it)| {
                 let base = if edge == filmcraft_edit::Edge::In { it.start } else { it.end() };
-                let target = snap(app, seq, layout, rate.snap_nearest(base + (t_here - from)), &[clip]);
-                // stop at the end of the media (or the neighbour), as the trim on release will (#653)
-                let delta = filmcraft_engine::commands::trim_delta_linked(&app.session, clip, edge, mode, target - base, linked).unwrap_or(target - base);
-                Drag::Trim { clip, edge, mode, delta, from, linked }
+                // the trimmed edges don't snap to themselves
+                let mut own = vec![clip];
+                own.extend(others.iter().copied());
+                let target = snap(app, seq, layout, rate.snap_nearest(base + (t_here - from)), &own);
+                // stop at the end of the media (or the neighbour), as the trim on release will
+                // (#653); with other selected clips, at the first limit any of them reaches
+                let delta =
+                    filmcraft_engine::commands::trim_delta_group(&app.session, clip, &others, edge, mode, target - base, linked).unwrap_or(target - base);
+                Drag::Trim { clip, edge, mode, delta, from, linked, others }
             }),
             Drag::Remix { clip, from, .. } => seq.find_item(clip).map(|(_, it)| {
                 let target = rate.snap_nearest(it.end() + (t_here - from)).max(it.start + rate.frame_duration());
@@ -909,9 +975,9 @@ fn commit_drag(app: &mut FilmcraftApp, ctx: &egui::Context, resp: &egui::Respons
                     let captions = track_select_drag_captions(app, copying, mods.command);
                     Some(app.session.execute("timeline.move", json!({"moves": moves, "insert": mods.command, "linked": false, "copy": copying, "captions": captions})))
                 }
-                Drag::Trim { clip, edge, mode, delta, linked, .. } if delta != Tick::ZERO => Some(app.session.execute(
+                Drag::Trim { clip, edge, mode, delta, linked, others, .. } if delta != Tick::ZERO => Some(app.session.execute(
                     "timeline.trim",
-                    json!({"clip": clip.0, "edge": if edge == filmcraft_edit::Edge::In {"in"} else {"out"}, "mode": if mode == filmcraft_edit::TrimMode::Ripple {"ripple"} else {"regular"}, "delta": delta.0, "linked": linked}),
+                    json!({"clip": clip.0, "clips": others.iter().map(|c| c.0).collect::<Vec<_>>(), "edge": if edge == filmcraft_edit::Edge::In {"in"} else {"out"}, "mode": if mode == filmcraft_edit::TrimMode::Ripple {"ripple"} else {"regular"}, "delta": delta.0, "linked": linked}),
                 )),
                 Drag::Stretch { clip, edge, delta, linked, .. } if delta != Tick::ZERO => Some(app.session.execute("timeline.rateStretch", json!({"clip": clip.0, "edge": if edge == filmcraft_edit::Edge::In {"in"} else {"out"}, "delta": delta.0, "linked": linked}))),
                 Drag::Remix { clip, delta, .. } if delta != Tick::ZERO => {

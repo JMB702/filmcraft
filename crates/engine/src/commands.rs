@@ -967,13 +967,91 @@ pub fn trim_delta(s: &Session, clip: ClipId, edge: Edge, mode: TrimMode, delta: 
 /// [`trim_delta`] for a trim that, with `linked` false (Alt held), leaves the clip's linked
 /// partners alone (#3300).
 pub fn trim_delta_linked(s: &Session, clip: ClipId, edge: Edge, mode: TrimMode, delta: Tick, linked: bool) -> Result<Tick> {
+    trim_delta_group(s, clip, &[], edge, mode, delta, linked)
+}
+
+/// The clips a trim of `clip`'s edge together with the selected `extra` clips moves: each one and,
+/// with `linked`, its linked partners, once each, `clip` first. Clips on locked tracks are left
+/// out (a locked track never trims), except `clip` itself, which the trim refuses instead. An
+/// `extra` clip on a locked track brings no partners either: its sound stays with its picture.
+pub fn trim_members(s: &Session, clip: ClipId, extra: &[ClipId], linked: bool) -> Vec<ClipId> {
+    let Some(q) = s.active_sequence() else { return vec![clip] };
+    let unlocked = |c: &ClipId| q.find_item(*c).is_some_and(|(t, _)| q.track(t).is_some_and(|tr| !tr.locked));
+    let mut grabbed = vec![clip];
+    grabbed.extend(extra.iter().copied().filter(|c| *c != clip && unlocked(c)));
+    let all = if linked { with_links(s, &grabbed) } else { with_links_off(&grabbed) };
+    all.into_iter().filter(|c| *c == clip || unlocked(c)).collect()
+}
+
+/// `clips` once each, in order.
+fn with_links_off(clips: &[ClipId]) -> Vec<ClipId> {
+    let mut out = Vec::with_capacity(clips.len());
+    for c in clips {
+        if !out.contains(c) {
+            out.push(*c);
+        }
+    }
+    out
+}
+
+/// A ripple trim of several edges ripples each track once, so it takes one edge per track: the
+/// track that two of `members` share, if any.
+fn shared_ripple_track(q: &filmcraft_project::Sequence, members: &[ClipId]) -> Option<TrackId> {
+    let mut seen: Vec<TrackId> = Vec::new();
+    for c in members {
+        let (t, _) = q.find_item(*c)?;
+        if seen.contains(&t) {
+            return Some(t);
+        }
+        seen.push(t);
+    }
+    None
+}
+
+/// [`trim_delta_linked`] for a drag on one edge of several selected clips (`extra`, besides
+/// `clip`): the one delta every edge can take, so the drag stops for all of them at the first
+/// limit any of them reaches.
+pub fn trim_delta_group(s: &Session, clip: ClipId, extra: &[ClipId], edge: Edge, mode: TrimMode, delta: Tick, linked: bool) -> Result<Tick> {
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
     let durations = |id: ItemId| crate::media_duration(&s.project, &s.media, id);
     let starts = |id: ItemId| crate::media_start(&s.project, id);
     let mut next = s.project.next_id;
     let ctx = edit::EditCtx { next_id: &mut next, media_duration: &durations, media_start: &starts, min_duration: q.settings.frame_rate.frame_duration() };
-    let clips = if linked { with_links(s, &[clip]) } else { vec![clip] };
-    clamp_trim_linked(q, &clips, edge, mode, delta, &ctx)
+    let members = trim_members(s, clip, extra, linked);
+    if mode == TrimMode::Ripple
+        && !extra.is_empty()
+        && let Some(t) = shared_ripple_track(q, &members)
+    {
+        return Err(EngineError::Other(format!("a ripple trim takes one edge per track, and two of these clips are on {}", edit::track_label(q, t))));
+    }
+    clamp_trim_linked(q, &members, edge, mode, delta, &ctx)
+}
+
+/// The most clips one `timeline.trim` takes in `clips`.
+const MAX_TRIM_CLIPS: usize = 10_000;
+
+/// `timeline.trim`'s `clips`: the other selected clips that trim along. Every entry must be a
+/// clip of the active sequence; anything else is refused before the edit.
+fn trim_extra_p(s: &Session, p: &Value) -> Result<Vec<ClipId>> {
+    let Some(v) = p.get("clips") else { return Ok(Vec::new()) };
+    let arr = v.as_array().ok_or_else(|| bad("timeline.trim", "`clips` must be a list of clip ids"))?;
+    // the members are matched against each other, so a huge list would stall the edit
+    if arr.len() > MAX_TRIM_CLIPS {
+        return Err(bad("timeline.trim", format!("`clips` holds {} clips; a trim takes at most {MAX_TRIM_CLIPS}", arr.len())));
+    }
+    let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let mut out = Vec::with_capacity(arr.len());
+    let mut seen = std::collections::HashSet::with_capacity(arr.len());
+    for x in arr {
+        let c = x.as_u64().map(ClipId).ok_or_else(|| bad("timeline.trim", format!("`clips` holds {x}, not a clip id")))?;
+        if q.find_item(c).is_none() {
+            return Err(bad("timeline.trim", format!("no clip {} in the sequence", c.0)));
+        }
+        if seen.insert(c) {
+            out.push(c);
+        }
+    }
+    Ok(out)
 }
 
 /// `clip` and, unless `p` has `"linked": false` (Alt held), its linked partners.
@@ -3499,10 +3577,11 @@ fn build() -> Vec<CommandSpec> {
             "Trim Edit",
             [],
             None,
-            r#"{"clip":id,"edge":"in|out","mode":"regular|ripple","delta":ticks|"deltaFrames":i64,"linked":bool?}"#,
+            r#"{"clip":id,"clips":[id]?,"edge":"in|out","mode":"regular|ripple","delta":ticks|"deltaFrames":i64,"linked":bool?} (`clips`: more selected clips whose same edge trims along, by one delta)"#,
             has_seq,
             |s, p| {
                 let c = clip_p(p, "clip").ok_or_else(|| bad("timeline.trim", "need `clip`"))?;
+                let extra = trim_extra_p(s, p)?;
                 let edge = if str_p(p, "edge") == Some("in") { Edge::In } else { Edge::Out };
                 let mode = if str_p(p, "mode") == Some("ripple") { TrimMode::Ripple } else { TrimMode::Regular };
                 let d = p
@@ -3511,7 +3590,17 @@ fn build() -> Vec<CommandSpec> {
                     .map(Tick)
                     .or_else(|| p.get("deltaFrames").and_then(Value::as_i64).map(|f| s.sequence_rate().tick_of(f)))
                     .unwrap_or_default();
-                let clips = with_links_p(s, p, c);
+                let clips = trim_members(s, c, &extra, bool_p(p, "linked").unwrap_or(true));
+                if mode == TrimMode::Ripple
+                    && !extra.is_empty()
+                    && let Some(q) = s.active_sequence()
+                    && let Some(t) = shared_ripple_track(q, &clips)
+                {
+                    return Err(bad(
+                        "timeline.trim",
+                        format!("a ripple trim takes one edge per track, and two of these clips are on {}", edit::track_label(q, t)),
+                    ));
+                }
                 // a ripple trim's step records the ripple id, whichever command runs it
                 let outer = s.command_origin.clone();
                 if mode == TrimMode::Ripple {
