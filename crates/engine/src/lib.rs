@@ -1558,6 +1558,8 @@ mod media_watch_tests;
 #[cfg(test)]
 mod mixer_tests;
 #[cfg(test)]
+mod multi_trim_tests;
+#[cfg(test)]
 mod multicam_tests;
 #[cfg(test)]
 mod named_targets_tests;

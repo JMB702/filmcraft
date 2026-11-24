@@ -79,6 +79,7 @@ mod timeline_gap_ui;
 mod timeline_marquee_ui;
 mod timeline_marquee_vscroll_ui;
 mod timeline_middle_pan_ui;
+mod timeline_multi_trim_ui;
 mod timeline_option_drag_ui;
 mod timeline_ruler_menu_ui;
 mod timeline_scroll_ui;

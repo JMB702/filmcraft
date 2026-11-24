@@ -215,7 +215,7 @@ pub fn toggle_type(s: &mut Session) -> Result<Value> {
 /// Trim every selected edit point by `delta` (edit point movement; positive = later).
 fn trim_all(s: &mut Session, delta: Tick) -> Result<Value> {
     let n0 = s.history.undo.len();
-    let applied = trim_all_raw(s, &|_, _| Some(delta))?;
+    let applied = trim_all_uniform(s, delta)?;
     crate::clip_ops::collapse_history(s, n0, "Trim by Frames");
     let first = applied.first().and_then(Value::as_i64).map(Tick).unwrap_or_default();
     add_shift(s, first);
@@ -238,6 +238,59 @@ fn add_shift(s: &mut Session, d: Tick) {
 /// Reset the Trim Monitor counters (a new edit point selection starts a new trim session).
 fn reset_shift(s: &mut Session) {
     s.state.trim_shift = TrimShift::default();
+}
+
+/// Trim every selected edit point by the same `delta`. When they are all the same side (In or Out)
+/// of different clips with the same trim kind, they trim as one `timeline.trim`: one clamp for all
+/// of them, so they stop together at the first limit any of them reaches, instead of each going as
+/// far as it can (the Timeline's multi-clip trim drag does the same). Rolls, mixed sides or kinds,
+/// and ripples with two edges on one track trim point by point.
+fn trim_all_uniform(s: &mut Session, delta: Tick) -> Result<Vec<Value>> {
+    let Some((first, extra)) = uniform_group(s) else { return trim_all_raw(s, &|_, _| Some(delta)) };
+    let params = json!({
+        "clip": first.clip.0,
+        "clips": extra.iter().map(|c| c.0).collect::<Vec<_>>(),
+        "edge": if first.out { "out" } else { "in" },
+        "mode": if first.kind == TrimKind::Ripple { "ripple" } else { "regular" },
+        "delta": delta.0,
+    });
+    let outer = s.command_origin.replace(first.kind.history_origin().to_string());
+    let r = s.execute("timeline.trim", params);
+    s.command_origin = outer;
+    Ok(vec![r?.get("delta").cloned().unwrap_or(Value::Null)])
+}
+
+/// The selected edit points as one multi-clip trim: the first point and the other points' clips,
+/// when every point is a Trim or Ripple of the same side with the same kind, of two or more clips.
+fn uniform_group(s: &Session) -> Option<(EditPoint, Vec<ClipId>)> {
+    let pts = &s.state.edit_points;
+    let first = *pts.first()?;
+    if first.kind == TrimKind::Roll || pts.iter().any(|e| e.kind != first.kind || e.out != first.out) {
+        return None;
+    }
+    let mut extra: Vec<ClipId> = Vec::new();
+    for e in &pts[1..] {
+        if e.clip != first.clip && !extra.contains(&e.clip) {
+            extra.push(e.clip);
+        }
+    }
+    if extra.is_empty() {
+        return None;
+    }
+    if first.kind == TrimKind::Ripple {
+        // one edge per track: two on a track would ripple it twice
+        let seq = s.active_sequence()?;
+        let members = crate::commands::trim_members(s, first.clip, &extra, true);
+        let mut tracks: Vec<TrackId> = Vec::new();
+        for c in &members {
+            let (t, _) = seq.find_item(*c)?;
+            if tracks.contains(&t) {
+                return None;
+            }
+            tracks.push(t);
+        }
+    }
+    Some((first, extra))
 }
 
 /// Trim every selected edit point; `delta_for` gives each point's own movement, read from the sequence as it is when that point is reached.
@@ -575,14 +628,14 @@ fn apply_dynamic(s: &mut Session, offset: Tick) -> Result<Tick> {
     let redo = std::mem::take(&mut s.history.redo);
     s.history.limit = usize::MAX;
     s.project = d.before.clone();
-    let r = if offset == Tick::ZERO { Ok(vec![json!(0)]) } else { trim_all_raw(s, &|_, _| Some(offset)) };
+    let r = if offset == Tick::ZERO { Ok(vec![json!(0)]) } else { trim_all_uniform(s, offset) };
     let applied = match r {
         Ok(a) => a.first().and_then(Value::as_i64).map(Tick).unwrap_or_default(),
         Err(_) => {
             // refused outright (e.g. it would break sync): stay where we were
             s.project = d.before.clone();
             if d.offset != Tick::ZERO {
-                let _ = trim_all_raw(s, &|_, _| Some(d.offset));
+                let _ = trim_all_uniform(s, d.offset);
             }
             d.offset
         }

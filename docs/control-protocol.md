@@ -181,7 +181,16 @@ it shows. With Linked Selection on, selecting an edge includes its unlocked link
 on untargeted tracks; `add: true` (Shift-click) toggles the group. Regular/ripple trims select the
 corresponding In/Out edges. Rolls include only matching linked cuts at the same time, leaving split
 audio cuts separate. Each linked group moves once and shares its tightest trim limit; turning
-Linked Selection off allows individual edges to be selected and edited.
+Linked Selection off allows individual edges to be selected and edited. Selected In (or Out) edges
+of several clips with one trim kind trim as one edit: they move together, stop together at the
+first limit any of them reaches, and make one undo step.
+**Trimming several clips** (`timeline.trim {clip, clips: [id], edge, mode, delta}`): the same
+edge of every clip in `clips` (and, unless `linked: false`, their linked partners) trims along
+with `clip`'s, by one delta clamped to the tightest limit among them (end of media, a neighbour on
+a regular trim, one frame left), in one undo step. Clips on locked tracks are skipped with their
+partners. A ripple takes one edge per track and refuses two on one track. Dragging the edge of a
+selected clip in the Timeline does this for the other selected clips (and the other selected edit
+points of the same side and kind); an unselected clip's edge trims alone.
 Dynamic trimming takes an explicit clock (seconds) so it is deterministic: `trim.shuttle
 {direction, slow?, clock}` (J/L), `trim.tick {clock}`, `trim.shuttleStop {clock?}` (K, one undo step),
 `trim.cancelDynamic` (Esc), `trim.playAround {clock, loop?}` (Space / Shift+K).
