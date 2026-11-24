@@ -17,6 +17,8 @@
 
 mod fixtures;
 #[allow(dead_code)]
+mod layers;
+#[allow(dead_code)]
 mod playback;
 mod sections;
 

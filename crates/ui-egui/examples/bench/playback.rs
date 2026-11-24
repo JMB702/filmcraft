@@ -112,8 +112,30 @@ pub struct Display {
     gpu: Option<(filmcraft_gpu::GpuCompositor, eframe::wgpu::Device)>,
     last: Option<FrameKey>,
     present: Vec<Duration>,
+    /// Of each present: the part spent making and filling source textures.
+    upload: Vec<Duration>,
+    /// Of each presented plan: its layers and the bytes it holds (frames + converted texels).
+    plan_layers: Vec<usize>,
+    plan_bytes: Vec<usize>,
     ui_cpu: Duration,
     uploaded: u64,
+}
+
+/// Layers a plan draws.
+fn plan_layer_count(plan: &filmcraft_render::plan::FramePlan) -> usize {
+    use filmcraft_render::plan::{FramePlan, PlanStep};
+    match plan {
+        FramePlan::Image(_) => 1,
+        FramePlan::Layers { layers, .. } => layers.len(),
+        FramePlan::Composite { steps, .. } => steps
+            .iter()
+            .map(|s| match s {
+                PlanStep::Layers(l) => l.len(),
+                PlanStep::Transition { inputs, .. } => inputs.iter().map(Vec::len).sum(),
+                PlanStep::Adjust { .. } => 0,
+            })
+            .sum(),
+    }
 }
 
 impl Display {
@@ -129,7 +151,7 @@ impl Display {
         } else {
             None
         };
-        Self { gpu, last: None, present: Vec::new(), ui_cpu: Duration::ZERO, uploaded: 0 }
+        Self { gpu, last: None, present: Vec::new(), upload: Vec::new(), plan_layers: Vec::new(), plan_bytes: Vec::new(), ui_cpu: Duration::ZERO, uploaded: 0 }
     }
 
     pub fn gpu_available(&self) -> bool {
@@ -154,11 +176,14 @@ impl Display {
             if let Some((k, plan)) = plan.or_else(|| server.nearest_plan(key, 6))
                 && self.last != Some(k)
             {
-                let before = comp.uploaded_bytes;
+                let (before, up0) = (comp.uploaded_bytes, comp.upload_ns);
                 let _ = comp.composite_prepared(&plan.plan, Some(&plan.prepared));
                 // Wait for the GPU so the time includes the upload and the draw.
                 let _ = dev.poll(eframe::wgpu::PollType::wait_indefinitely());
                 self.uploaded += comp.uploaded_bytes - before;
+                self.upload.push(Duration::from_nanos(comp.upload_ns - up0));
+                self.plan_layers.push(plan_layer_count(&plan.plan));
+                self.plan_bytes.push(plan.plan.source_bytes() + plan.prepared.bytes());
                 self.last = Some(k);
                 presented = true;
             }
@@ -214,6 +239,19 @@ pub struct PlayReport {
     pub uploaded_mb: f64,
     pub load: String,
     pub preroll_ms: f64,
+    /// ms per presented frame spent making and filling source textures (part of `present`).
+    pub upload: Vec<f64>,
+    /// Mean layers and MB of the presented plans.
+    pub layers: f64,
+    pub plan_mb: f64,
+    /// Pictures decoded by hardware and by software, hardware decoders made, hardware streams
+    /// declined or that fell back to software, and the most decoders alive at once.
+    pub hw_frames: u64,
+    pub sw_frames: u64,
+    pub hw_sessions: u64,
+    pub hw_declined: u64,
+    pub hw_fallbacks: u64,
+    pub live_decoders: usize,
 }
 
 pub fn pct(v: &[f64], p: f64) -> f64 {
@@ -267,7 +305,12 @@ impl Bench {
         self.server.take_records();
         let gop0 = filmcraft_codecs::gop_stats();
         let (p0, ui0, up0) = (process_cpu_time().unwrap_or_default(), display.ui_cpu, display.uploaded);
+        let hw0 = filmcraft_codecs::hw::hw_stats();
+        let mut live_decoders = 0;
         display.present.clear();
+        display.upload.clear();
+        display.plan_layers.clear();
+        display.plan_bytes.clear();
         let period = Duration::from_secs_f64(1.0 / self.refresh_hz);
         // Preroll as the app does: refresh without moving the playhead until the first frames are
         // ready (or the timeout), then start the clock.
@@ -301,6 +344,7 @@ impl Bench {
             self.server.schedule_playback(key, rate, scale, &project, 1.0, false);
             let exact = display.refresh(&self.server, key);
             meter.refresh(frame, exact);
+            live_decoders = live_decoders.max(filmcraft_codecs::live_decoders());
             next += period;
             let now = Instant::now();
             if next > now {
@@ -323,7 +367,19 @@ impl Bench {
                 by_frame.insert(r.key.frame, *r);
             }
         }
+        let gop = filmcraft_codecs::gop_stats() - gop0;
+        let hw = filmcraft_codecs::hw::hw_stats();
+        let mean = |v: &[usize]| if v.is_empty() { 0.0 } else { v.iter().sum::<usize>() as f64 / v.len() as f64 };
         let mut rep = PlayReport {
+            upload: display.upload.iter().map(|d| ms(*d)).collect(),
+            layers: mean(&display.plan_layers),
+            plan_mb: mean(&display.plan_bytes) / 1e6,
+            hw_frames: hw.frames - hw0.frames,
+            sw_frames: gop.frames.saturating_sub(hw.frames - hw0.frames),
+            hw_sessions: hw.sessions - hw0.sessions,
+            hw_declined: hw.declined - hw0.declined,
+            hw_fallbacks: hw.fallbacks - hw0.fallbacks,
+            live_decoders,
             label: label.to_string(),
             seconds: wall,
             shown: meter.shown,
@@ -331,7 +387,7 @@ impl Bench {
             process_cpu,
             ui_cpu: ms(display.ui_cpu - ui0),
             jobs: recs.len(),
-            gop: filmcraft_codecs::gop_stats() - gop0,
+            gop,
             uploaded_mb: (display.uploaded - up0) as f64 / 1e6,
             load: load_avg(),
             preroll_ms,
@@ -527,7 +583,7 @@ pub struct ScrubReport {
 
 pub fn print_header() {
     println!(
-        "{:<34} {:>6} {:>5} {:>5} {:>7} | {:>6} {:>6} {:>6} | {:>6} {:>6} | {:>6} {:>6} {:>6} | {:>6} {:>6} | {:>7} {:>6} | {:>5} {:>5} {:>5} {:>4} | load",
+        "{:<34} {:>6} {:>5} {:>5} {:>7} | {:>6} {:>6} {:>6} | {:>6} {:>6} | {:>6} {:>6} {:>6} | {:>6} {:>6} {:>6} | {:>7} {:>6} | {:>5} {:>5} {:>5} {:>4} | {:>4} {:>6} {:>9} {:>4} | load",
         "scenario",
         "wall s",
         "shown",
@@ -543,12 +599,17 @@ pub fn print_header() {
         "srcC/j",
         "ui p50",
         "ui p95",
+        "upl50",
         "cpu ms/f",
         "cores",
         "seeks",
         "dec",
         "waste",
-        "canc"
+        "canc",
+        "lyrs",
+        "planMB",
+        "hw/sw",
+        "live"
     );
 }
 
@@ -556,7 +617,7 @@ pub fn print_row(r: &PlayReport, fps: f64) {
     let frames = (r.shown + r.dropped).max(1) as f64;
     let cpu_per_frame = r.process_cpu / frames;
     println!(
-        "{:<34} {:>6.2} {:>5} {:>5} {:>6.0}% | {:>6.1} {:>6.1} {:>6.1} | {:>6.1} {:>6.1} | {:>6.1} {:>6.1} {:>6.1} | {:>6.2} {:>6.2} | {:>7.1} {:>6.2} | {:>5} {:>5} {:>5} {:>4} | {}",
+        "{:<34} {:>6.2} {:>5} {:>5} {:>6.0}% | {:>6.1} {:>6.1} {:>6.1} | {:>6.1} {:>6.1} | {:>6.1} {:>6.1} {:>6.1} | {:>6.2} {:>6.2} {:>6.2} | {:>7.1} {:>6.2} | {:>5} {:>5} {:>5} {:>4} | {:>4.1} {:>6.0} {:>9} {:>4} | {}",
         r.label,
         r.seconds,
         r.shown,
@@ -572,12 +633,17 @@ pub fn print_row(r: &PlayReport, fps: f64) {
         r.src_cpu.iter().sum::<f64>() / r.jobs.max(1) as f64,
         pct(&r.present, 0.5),
         pct(&r.present, 0.95),
+        pct(&r.upload, 0.5),
         cpu_per_frame,
         cpu_per_frame * fps / 1000.0,
         r.gop.seeks,
         r.gop.decoded,
         r.wasted_jobs,
         r.cancelled_jobs,
+        r.layers,
+        r.plan_mb,
+        format!("{}/{}", r.hw_frames, r.sw_frames),
+        r.live_decoders,
         r.load
     );
 }
@@ -598,6 +664,10 @@ pub fn to_json(r: &PlayReport, scenario: &str, res: &str, path: &str) -> Value {
         "jobs": r.jobs, "wasted_jobs": r.wasted_jobs, "cancelled_jobs": r.cancelled_jobs, "preview_jobs": r.preview_jobs, "uploaded_mb": r.uploaded_mb,
         "gop": {"hits": r.gop.hits, "misses": r.gop.misses, "seeks": r.gop.seeks, "decoded": r.gop.decoded, "evicted": r.gop.evicted, "skipped": r.gop.skipped, "decode_ms": r.gop.decode_ns as f64 / 1e6},
         "loadavg": r.load, "preroll_ms": r.preroll_ms,
+        "upload_ms": {"p50": pct(&r.upload, 0.5), "p95": pct(&r.upload, 0.95)},
+        "layers_mean": r.layers, "plan_mb_mean": r.plan_mb,
+        "decoders": {"hw_frames": r.hw_frames, "sw_frames": r.sw_frames, "hw_sessions": r.hw_sessions, "hw_declined": r.hw_declined, "hw_fallbacks": r.hw_fallbacks, "live_max": r.live_decoders},
+        "render_ms_mean": (r.service.iter().sum::<f64>() - r.src_wall.iter().sum::<f64>()).max(0.0) / r.service.len().max(1) as f64,
     })
 }
 
@@ -612,6 +682,8 @@ struct Args {
     workers: usize,
     json: Option<String>,
     repeat: usize,
+    /// Settings ▸ Playback ▸ Hardware decoding: on (as the app) unless `--hw off`.
+    hw: bool,
 }
 
 fn parse_args() -> Args {
@@ -624,11 +696,21 @@ fn parse_args() -> Args {
         workers: FrameServer::default_workers(),
         json: None,
         repeat: 1,
+        hw: true,
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
-            "--scenario" | "-s" => a.scenarios.extend(it.next().unwrap_or_default().split(',').map(str::to_string)),
+            "--scenario" | "-s" => {
+                for name in it.next().unwrap_or_default().split(',') {
+                    if name == "layers" {
+                        a.scenarios.extend(crate::layers::matrix());
+                    } else {
+                        a.scenarios.push(name.to_string());
+                    }
+                }
+            }
+            "--hw" => a.hw = it.next().as_deref() != Some("off"),
             "--res" => {
                 a.res = it
                     .next()
@@ -650,7 +732,9 @@ fn parse_args() -> Args {
             "--json" => a.json = it.next(),
             "--help" | "-h" => {
                 println!(
-                    "bench_playback [--scenario h264-1080,stack3,stack3-blend,stack3-fx,h264-2160,hevc-2160,vp9-2160,av1-2160,demo,after-preview,seek-storm] [--res full,half] [--cpu|--gpu] [--seconds 8] [--refresh 60] [--workers N] [--repeat N] [--json out.json]"
+                    "bench_playback [--scenario h264-1080,stack3,stack3-blend,stack3-fx,h264-2160,hevc-2160,vp9-2160,av1-2160,demo,after-preview,seek-storm] [--res full,half] [--cpu|--gpu] [--hw auto|off] [--seconds 8] [--refresh 60] [--workers N] [--repeat N] [--json out.json]\n\
+                     layer scenarios: <shape>-<codec>-<res>-<n>, shape one of {}, codec h264|hevc10|hlg, res 1080|2160, n 1..4 (cover-hevc10-2160-2); `layers` runs the whole matrix",
+                    crate::layers::SHAPES.join("|")
                 );
                 std::process::exit(0);
             }
@@ -668,6 +752,9 @@ fn parse_args() -> Args {
 
 /// Build the session for a scenario (None when its fixtures are unavailable).
 pub fn scenario_session(name: &str) -> Option<(Session, ItemId)> {
+    if let Some(spec) = crate::layers::parse(name) {
+        return crate::layers::session(&spec);
+    }
     let mut s = Session::default();
     let seq = match name {
         "h264-1080" | "seek-storm" => {
@@ -770,6 +857,10 @@ pub fn scenario_session(name: &str) -> Option<(Session, ItemId)> {
 /// `bench_playback` / `cargo xtask bench-playback`.
 pub fn cli_main() {
     let args = parse_args();
+    // as the app at startup: the OS hardware decoders in front of ours
+    let hardware = filmcraft_platform::register();
+    filmcraft_codecs::hw::set_hardware_decoding(args.hw);
+    println!("hardware decoding: {} ({hardware:?})", if args.hw { "auto" } else { "off" });
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     println!(
         "FilmCraft playback bench: {} path, {} frame workers, {} cores, refresh {} Hz, {} s per play; load avg {}",
@@ -781,7 +872,7 @@ pub fn cli_main() {
         load_avg()
     );
     println!(
-        "lat = queue→ready per job, svc = worker time per job, cpu/j = worker thread CPU, src/j = source fetch (decode) wall, srcC/j = its thread CPU,\nui = present time on the UI thread (GPU upload+draw / texture conversion), cpu ms/f = process CPU per due frame, cores = CPU cores that rate needs at the sequence fps,\nseeks/dec = decoder restarts / samples decoded, waste = finished jobs for frames never due, canc = jobs cancelled while running (all times ms)\n"
+        "lat = queue→ready per job, svc = worker time per job, cpu/j = worker thread CPU, src/j = source fetch (decode) wall, srcC/j = its thread CPU,\nui = present time on the UI thread (GPU upload+draw / texture conversion), cpu ms/f = process CPU per due frame, cores = CPU cores that rate needs at the sequence fps,\nseeks/dec = decoder restarts / samples decoded, waste = finished jobs for frames never due, canc = jobs cancelled while running, upl = the part of ui that makes and fills source textures,\nlyrs / planMB = layers and MB of a presented plan, hw/sw = pictures decoded by the OS hardware decoder / in software, live = most decoders alive at once (all times ms)\n"
     );
     print_header();
     let mut out = Vec::new();
