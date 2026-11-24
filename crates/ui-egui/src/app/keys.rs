@@ -40,6 +40,14 @@ impl FilmcraftApp {
         if self.session.trim_play.dynamic.is_some() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             let _ = self.session.execute("trim.cancelDynamic", json!({}));
         }
+        // Esc in the Timeline clears a selected gap, as clicking elsewhere does. Not consumed: an
+        // open menu still closes on the same press, and a drag in progress cancels instead.
+        if self.ui.focused == PanelKind::Timeline
+            && self.session.state.gap_selection.is_some()
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape) && i.modifiers.is_none() && !i.pointer.any_down())
+        {
+            let _ = self.session.execute("edit.deselectAll", json!({}));
+        }
         panels::masks::pen_take_back(self, ctx, text_focused);
         let fire = ctx.input_mut(|i| self.match_shortcuts(i, text_focused, divider_focused, label_selected));
         self.fire_shortcuts(ctx, fire);

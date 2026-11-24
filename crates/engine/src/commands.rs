@@ -5120,17 +5120,9 @@ fn close_sequence_gaps(s: &mut Session) -> Result<Value> {
 /// `sequence.closeGap`: ripple the gap on `track` at `t` closed (one undo step, "Ripple Delete").
 fn close_gap(s: &mut Session, tr: TrackId, t: Tick) -> Result<()> {
     s.edit_sequence("Ripple Delete", |q, _, st| {
-        let before: Vec<(ClipId, Tick)> = q.track(tr).map(|x| x.items.iter().map(|i| (i.id, i.start)).collect()).unwrap_or_default();
-        edit::close_gap(q, tr, t)?;
+        let gap = edit::close_gap(q, tr, t)?;
         if st.ripple_sequence_markers {
-            // the gap ended where the first clip that moved started
-            let moved = before
-                .iter()
-                .filter_map(|(id, old)| q.find_item(*id).filter(|(_, i)| i.start != *old).map(|(_, i)| (*old, *old - i.start)))
-                .min_by_key(|m| m.0);
-            if let Some((end, len)) = moved {
-                crate::sequence_tools::ripple_markers(&mut q.markers, end, -len);
-            }
+            crate::sequence_tools::ripple_markers(&mut q.markers, gap.end(), -gap.duration);
         }
         Ok(())
     })

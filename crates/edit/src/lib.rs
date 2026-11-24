@@ -10,6 +10,9 @@
 //! - **Lift** leaves a gap; **Extract** closes it (ripple) on targeted + sync-locked tracks.
 //! - **Ripple delete** removes items and closes the gap; fails if a sync-locked track has material in
 //!   the gap (it would lose sync).
+//! - **Ripple delete on a gap** ([`close_gap`]) moves the gap's track and the sync-locked ones
+//!   (captions too) up by its length; refused when one of them has media in the gap's time, or
+//!   when linked clips on a track that does not move would go out of sync.
 //! - Trims: regular, ripple, roll, slip, slide and rate stretch, all limited by media handles and
 //!   neighbouring items.
 //!
@@ -40,6 +43,15 @@ pub enum EditError {
     /// Names the sync-locked track (`A2`) whose clip is in the way.
     #[error("this edit would break sync: {0} is sync-locked and has a clip in the way (turn off its sync lock, or lock the track, to make this edit)")]
     SyncLockConflict(String),
+    /// Closing a gap would move a track (`V2`, `A1`, `C1`) that has a clip or caption in the
+    /// gap's time. Premiere Pro calls it media in the way.
+    #[error("can't close the gap: {0} has a clip in the gap's time and would move with it (lock {0}, or turn off its sync lock, to close the gap)")]
+    GapBlocked(String),
+    /// Closing a gap would move clips whose linked partners sit on a track that does not move.
+    #[error(
+        "can't close the gap: clips that would move have linked clips on {0}, which is not sync-locked, so they would go out of sync (turn on {0}'s sync lock, or lock it)"
+    )]
+    LinkedOutOfSync(String),
     #[error("not enough media (handles) for this trim")]
     NoHandles,
     #[error("edit would make a clip shorter than one frame")]
@@ -527,23 +539,40 @@ pub fn ripple_delete_items(seq: &mut Sequence, items: &[ClipId]) -> Result<Vec<T
     Ok(spans)
 }
 
-/// Close the gap containing `t` on a track (Ripple Delete on a gap).
-pub fn close_gap(seq: &mut Sequence, track: TrackId, t: Tick) -> Result<()> {
+/// Close the gap containing `t` on a track (Ripple Delete on a gap, as in Premiere Pro). The
+/// track ripples left by the gap's length, and so does every unlocked sync-locked track (media
+/// and caption tracks), so later clips stay in sync. Clip markers, linked sound on those tracks
+/// and transitions move with their clips; locked tracks never move. Refused, with the sequence
+/// unchanged, for the reasons [`closable_gap`] gives. Returns the closed stretch, so callers can
+/// ripple sequence markers after it.
+pub fn close_gap(seq: &mut Sequence, track: TrackId, t: Tick) -> Result<TimeRange> {
     let gap = closable_gap(seq, track, t)?;
     let mut work = seq.clone();
-    for tr in work.all_tracks_mut() {
-        if tr.locked || (tr.id != track && !tr.sync_lock) {
-            continue;
-        }
+    for tr in work.all_tracks_mut().filter(|tr| ripples_with_gap(tr, track)) {
         shift_track_from(tr, gap.end(), -gap.duration);
     }
+    for ct in work.caption_tracks.iter_mut().filter(|c| !c.locked && c.sync_lock) {
+        captions::shift_from(ct, gap.end(), -gap.duration);
+    }
     *seq = work;
-    Ok(())
+    Ok(gap)
 }
 
-/// The gap on `track` at `t` that [`close_gap`] would close, or why it can't (a locked track, no
-/// gap there, a sync-locked track with a clip in the way). Changes nothing, so menus can grey out
-/// Ripple Delete on a gap that won't close (#2960), as Premiere Pro does.
+/// Whether a media track moves when the gap on `gap_track` closes: that track, and every
+/// unlocked sync-locked one.
+fn ripples_with_gap(tr: &Track, gap_track: TrackId) -> bool {
+    !tr.locked && (tr.id == gap_track || tr.sync_lock)
+}
+
+/// The gap on `track` at `t` that [`close_gap`] would close, or why it can't. Changes nothing, so
+/// menus can grey out Ripple Delete on a gap that won't close (#2960), as Premiere Pro does.
+///
+/// - [`EditError::Locked`]: the gap's track is locked (the other tracks would move without it).
+/// - [`EditError::Nothing`]: no gap there (inside a clip, or after the track's last clip).
+/// - [`EditError::GapBlocked`]: an unlocked sync-locked track (media or captions) has something
+///   in the gap's time, so closing it would overwrite that or pull the track out of sync.
+/// - [`EditError::LinkedOutOfSync`]: a clip that would move has a linked partner on an unlocked
+///   track that is not sync-locked, which would stay put and drift out of sync.
 pub fn closable_gap(seq: &Sequence, track: TrackId, t: Tick) -> Result<TimeRange> {
     let tr = seq.track(track).ok_or(EditError::NoTrack(track))?;
     if tr.locked {
@@ -555,9 +584,30 @@ pub fn closable_gap(seq: &Sequence, track: TrackId, t: Tick) -> Result<TimeRange
     }
     let prev_end = tr.items.iter().filter(|i| i.end() <= t).map(|i| i.end()).max().unwrap_or(Tick::ZERO);
     let next_start = tr.items.iter().filter(|i| i.start > t).map(|i| i.start).min().ok_or(EditError::Nothing)?;
+    if t < prev_end || next_start <= prev_end {
+        // before the sequence start (the first clip starts at zero): no empty time there
+        return Err(EditError::Nothing);
+    }
     let gap = TimeRange::from_bounds(prev_end, next_start);
-    if let Some(tr) = seq.all_tracks().find(|tr| tr.id != track && !tr.locked && tr.sync_lock && !track_range_empty(tr, gap)) {
-        return Err(EditError::SyncLockConflict(track_label(seq, tr.id)));
+    if let Some(tr) = seq.all_tracks().find(|tr| tr.id != track && ripples_with_gap(tr, track) && !track_range_empty(tr, gap)) {
+        return Err(EditError::GapBlocked(track_label(seq, tr.id)));
+    }
+    if let Some(i) = seq.caption_tracks.iter().position(|c| !c.locked && c.sync_lock && c.captions.iter().any(|c| c.range().overlaps(&gap))) {
+        return Err(EditError::GapBlocked(format!("C{}", i + 1)));
+    }
+    // linked partners of the clips that move must move too, or be on a locked track
+    let moving: std::collections::HashSet<u64> = seq
+        .all_tracks()
+        .filter(|tr| ripples_with_gap(tr, track))
+        .flat_map(|tr| tr.items.iter())
+        .filter(|i| i.start >= gap.end())
+        .filter_map(|i| i.link)
+        .collect();
+    if !moving.is_empty()
+        && let Some(tr) =
+            seq.all_tracks().find(|tr| !tr.locked && !ripples_with_gap(tr, track) && tr.items.iter().any(|i| i.link.is_some_and(|l| moving.contains(&l))))
+    {
+        return Err(EditError::LinkedOutOfSync(track_label(seq, tr.id)));
     }
     Ok(gap)
 }

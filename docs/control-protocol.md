@@ -155,6 +155,26 @@ step (Track Select Forward / Backward drags use it so subtitles stay with the di
 as far as the clips (they would overlap captions that stay, or one is on a locked track) the call fails and
 nothing moves; it cannot be combined with `copy`, and the result lists them as `captions`.
 
+**Gaps** (`crates/engine/src/commands.rs`, edit algebra `filmcraft_edit::close_gap`): clicking empty
+time between two clips on a video or audio track, or before a track's first clip, selects that gap
+(`timeline.gap` is its highlight). `timeline.selectGap {track: "V1"|id, time|frame|seconds}` does the
+same → `{track, start, end}`; empty time after a track's last clip, time inside a clip, and a locked
+track are errors. The gap replaces the clip, caption, transition and edit point selections; clicking
+a clip or anywhere else, Edit ▸ Deselect All and Esc in the Timeline clear it (`sequence.inspect`
+reports it as `gapSelection`). Delete, Forward Delete, Edit ▸ Clear, Edit ▸ Ripple Delete
+(`edit.clear` / `edit.rippleDelete` with no `clips`), the gap's right-click menu
+(`timeline.gapMenu.edit.rippleDelete`) and `sequence.closeGap {}` close the selected gap;
+`sequence.closeGap {track, time}` closes the gap there without selecting it. Closing it is one
+"Ripple Delete" undo step: the gap's track and every unlocked sync-locked track (caption tracks
+too) move left by the gap's length from its end, with their transitions, clip markers and linked
+sound; sequence markers after it move too when Markers ▸ Ripple Sequence Markers is on. Locked
+tracks never move and block nothing. The edit is refused, nothing changes and the commands are
+greyed out with the reason (the status bar shows it when the key is pressed) when an unlocked
+sync-locked track has a clip or caption in the gap's time ("can't close the gap: A2 has a clip in
+the gap's time…", Premiere's "media is in the way"), or when clips that would move have linked
+clips on an unlocked track that is not sync-locked and would go out of sync. Sequence ▸ Close Gap
+with no gap selected closes every gap between In and Out instead.
+
 **Trim mode** (`crates/engine/src/trim.rs`): `trim.selectEditPoint` / `trim.selectNearest` enter trim
 mode (the Program monitor becomes the Trim Monitor, ids `trimMonitor.*`); `trim.monitor` returns what
 it shows. With Linked Selection on, selecting an edge includes its unlocked linked partners, even

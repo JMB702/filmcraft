@@ -334,3 +334,74 @@ fn a_gap_blocked_by_a_sync_locked_clip_greys_out_ripple_delete() {
     assert_eq!(q.video_tracks[0].items[1].start, rate.tick_of(48), "the gap closed");
     assert_eq!(q.video_tracks[1].items[0].start, rate.tick_of(24), "V2, not sync-locked, stays put");
 }
+
+/// A gap closed with Ripple Delete takes the sync-locked caption track and (with Markers ▸ Ripple
+/// Sequence Markers on) the sequence markers after it along, all in one undo step.
+#[test]
+fn closing_a_gap_moves_captions_and_sequence_markers_in_one_undo_step() {
+    let mut s = Session::default();
+    let [(picture1, _), (picture2, sound2)] = two_clips(&mut s, [0, 96]);
+    let rate = s.sequence_rate();
+    let f = |n: i64| rate.tick_of(n);
+    s.execute("captions.newTrack", json!({"format": "Subtitle"})).unwrap();
+    let early =
+        s.execute("captions.add", json!({"track": "C1", "text": "Early", "time": f(10).0, "durationSeconds": 0.5})).unwrap()["caption"].as_u64().unwrap();
+    let late =
+        s.execute("captions.add", json!({"track": "C1", "text": "Late", "time": f(100).0, "durationSeconds": 0.5})).unwrap()["caption"].as_u64().unwrap();
+    s.state.ripple_sequence_markers = true;
+    s.execute("markers.add", json!({"time": f(120).0, "name": "After the gap"})).unwrap();
+    s.execute("markers.add", json!({"time": f(12).0, "name": "Before the gap"})).unwrap();
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    let before = s.project.clone();
+    let undo = s.history.undo.len();
+
+    s.execute("timeline.selectGap", json!({"track": "V1", "frame": 60})).unwrap();
+    s.execute("edit.rippleDelete", json!({})).unwrap();
+
+    let q = s.active_sequence().unwrap();
+    q.check().unwrap();
+    assert_eq!((range(&s, picture1).0, range(&s, picture2).0, range(&s, sound2).0), (Tick::ZERO, f(48), f(48)));
+    let cap = |id: u64| q.find_caption(ClipId(id)).map(|(_, c)| c.start).unwrap();
+    assert_eq!((cap(early), cap(late)), (f(10), f(52)), "the caption after the gap moves with the clips");
+    let marks: Vec<(String, Tick)> = q.markers.iter().map(|m| (m.name.clone(), m.start)).collect();
+    assert_eq!(marks, vec![("Before the gap".into(), f(12)), ("After the gap".into(), f(72))]);
+
+    assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
+    assert_eq!(s.undo().as_deref(), Some("Ripple Delete"));
+    assert_eq!(*s.project, *before, "undo puts clips, captions and markers back");
+}
+
+/// A caption in the gap's time is in the way, as a clip would be: Ripple Delete is greyed out with
+/// the reason, and Delete does nothing.
+#[test]
+fn a_caption_in_the_gap_blocks_it() {
+    let mut s = Session::default();
+    let [_, (picture2, _)] = two_clips(&mut s, [0, 96]);
+    let rate = s.sequence_rate();
+    s.execute("captions.newTrack", json!({"format": "Subtitle"})).unwrap();
+    s.execute("captions.add", json!({"track": "C1", "text": "Hi", "time": rate.tick_of(60).0, "durationSeconds": 0.5})).unwrap();
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    s.execute("timeline.selectGap", json!({"track": "V1", "frame": 60})).unwrap();
+    let why = crate::find_command("edit.rippleDelete").map(|c| (c.enabled)(&s)).unwrap().unwrap_err();
+    assert!(why.contains("C1") && why.contains("gap"), "{why}");
+    assert!(s.execute("edit.clear", json!({})).is_err());
+    assert_eq!(range(&s, picture2).0, rate.tick_of(96));
+}
+
+/// The pictures' linked sounds on A1 with A1's sync lock off would stay behind: refused, with the
+/// track named, and nothing moves.
+#[test]
+fn a_gap_whose_clips_have_linked_sound_on_an_unsynced_track_is_refused() {
+    let mut s = Session::default();
+    let [_, (picture2, sound2)] = two_clips(&mut s, [0, 96]);
+    let rate = s.sequence_rate();
+    s.execute("timeline.setTrack", json!({"track": "A1", "syncLock": false})).unwrap();
+    s.execute("timeline.selectGap", json!({"track": "V1", "frame": 60})).unwrap();
+    let why = crate::find_command("edit.rippleDelete").map(|c| (c.enabled)(&s)).unwrap().unwrap_err();
+    assert!(why.contains("A1") && why.contains("out of sync"), "{why}");
+    let before = s.project.clone();
+    let err = s.execute("sequence.closeGap", json!({"track": "V1", "frame": 60})).unwrap_err().to_string();
+    assert!(err.contains("A1"), "{err}");
+    assert!(std::sync::Arc::ptr_eq(&before, &s.project));
+    assert_eq!((range(&s, picture2).0, range(&s, sound2).0), (rate.tick_of(96), rate.tick_of(96)));
+}
