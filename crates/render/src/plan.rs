@@ -141,11 +141,60 @@ struct PlanStack {
     cpu_only: bool,
     /// Layers held in `steps`, kept as they are pushed so the cap check stays O(1).
     layers: usize,
+    /// A layer pushed since this was last cleared is opaque over the whole output and in Normal
+    /// mode: nothing pushed before it can be seen ([`crate::occlusion`]).
+    solid: bool,
+}
+
+/// A place in a [`PlanStack`]: its steps, and the layers of the run that was open.
+struct Mark {
+    steps: usize,
+    run: usize,
 }
 
 impl PlanStack {
     fn layer_count(&self) -> usize {
         self.layers
+    }
+
+    fn mark(&self) -> Mark {
+        let run = match self.steps.last() {
+            Some(PlanStep::Layers(layers)) => layers.len(),
+            _ => 0,
+        };
+        Mark { steps: self.steps.len(), run }
+    }
+
+    /// Take out what was pushed since `mark`, in order ([`Self::append`] puts it back).
+    fn take_since(&mut self, mark: &Mark) -> Vec<PlanStep> {
+        let mut taken = Vec::new();
+        // layers added to the run that was open at the mark
+        if let Some(PlanStep::Layers(run)) = mark.steps.checked_sub(1).and_then(|i| self.steps.get_mut(i))
+            && run.len() > mark.run
+        {
+            taken.push(PlanStep::Layers(run.split_off(mark.run)));
+        }
+        taken.extend(self.steps.drain(mark.steps.min(self.steps.len())..));
+        let count: usize = taken
+            .iter()
+            .map(|s| match s {
+                PlanStep::Layers(layers) => layers.len(),
+                PlanStep::Transition { inputs, .. } => inputs.iter().map(Vec::len).sum(),
+                PlanStep::Adjust { .. } => 0,
+            })
+            .sum();
+        self.layers = self.layers.saturating_sub(count);
+        taken
+    }
+
+    fn append(&mut self, steps: Vec<PlanStep>) {
+        for step in steps {
+            match step {
+                PlanStep::Layers(layers) => layers.into_iter().for_each(|l| self.push(l)),
+                PlanStep::Transition { inputs, effect, progress, scale } => self.push_transition(inputs, effect, progress, scale),
+                PlanStep::Adjust { ops } => self.push_adjust(ops),
+            }
+        }
     }
 
     fn push(&mut self, layer: PlanLayer) {
@@ -399,11 +448,48 @@ fn push_adjustment(sc: Scene, item: &TrackItem, out: &mut PlanStack) {
 }
 
 /// Push the layers of every video track of the scene's sequence at its time, bottom track first
-/// (the sequence must be [`layered_at`] that time).
+/// (the sequence must be [`layered_at`] that time), leaving out the tracks under a clip that
+/// covers the frame ([`crate::occlusion`]).
+///
+/// The track predicted to cover goes first. When what it pushed is a cover
+/// ([`PlanStack::solid`]), the tracks under it are never fetched; when it is not (offline media,
+/// a picture with alpha), they are pushed after all and what was made goes back on top of them.
 fn push_tracks(sc: Scene, layers: &mut PlanStack) {
+    let Scene { project, seq, t, opts, nest, .. } = sc;
+    let before = layers.solid;
+    // pictures that turned out not to cover, each with the tracks above it still to push
+    let mut stash: Vec<(Vec<PlanStep>, std::ops::Range<usize>)> = Vec::new();
+    let mut end = seq.video_tracks.len();
+    loop {
+        let floor = crate::occlusion::floor(project, seq, t, opts, nest, end);
+        if floor == 0 {
+            push_track_range(sc, 0..end, layers);
+            break;
+        }
+        let mark = layers.mark();
+        layers.solid = false;
+        push_track_range(sc, floor..floor + 1, layers);
+        if layers.solid || layers.exhausted {
+            push_track_range(sc, floor + 1..end, layers);
+            break;
+        }
+        stash.push((layers.take_since(&mark), floor + 1..end));
+        end = floor;
+    }
+    let mut covered = layers.solid;
+    while let Some((upper, above)) = stash.pop() {
+        layers.append(upper);
+        push_track_range(sc, above, layers);
+        covered |= layers.solid;
+    }
+    layers.solid = before || covered;
+}
+
+/// Push the layers of the video tracks `range` of the scene's sequence at its time, bottom first.
+fn push_track_range(sc: Scene, range: std::ops::Range<usize>, layers: &mut PlanStack) {
     let Scene { project, seq, t, opts, .. } = sc;
     let (w, h) = output_size(seq, opts.scale);
-    for tr in &seq.video_tracks {
+    for tr in seq.video_tracks.get(range).unwrap_or_default() {
         if layers.exhausted {
             return;
         }
@@ -576,6 +662,8 @@ fn push_item(sc: Scene, item: &TrackItem, extra_opacity: f32, blend: Option<Blen
         }
         return;
     }
+    // the output this sequence is drawn into (a nest pushed as layers has the size of the one it is in)
+    let (ow, oh) = output_size(seq, opts.scale);
     if let Some(chain) = gpu_chain(project, item, opts) {
         let Some(src) = sources.source(item.item) else { return };
         let Some(size) = crate::source_size(project, item.item) else { return };
@@ -622,7 +710,9 @@ fn push_item(sc: Scene, item: &TrackItem, extra_opacity: f32, blend: Option<Blen
                     .then_apply(&motion)
                     .then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
                 let fx = LayerFx { size: (lw as u32, lh as u32), decimation: n as u32, turns, ops };
+                let solid = opaque(&frame, op * extra_opacity, bl) && fx.ops.iter().all(FxOp::keeps_alpha) && crate::occlusion::covers(fx.size, &m, ow, oh);
                 out.push(PlanLayer { frame, matrix: m, opacity: op * extra_opacity, blend: bl, fx: Some(Arc::new(fx)), input });
+                out.solid |= solid;
                 return;
             }
         } else if plain {
@@ -640,15 +730,24 @@ fn push_item(sc: Scene, item: &TrackItem, extra_opacity: f32, blend: Option<Blen
                 .then_apply(&motion)
                 .then_apply(&Affine::scale(1.0 / px_scale, 1.0 / px_scale))
                 .then_apply(&quarter_turns(turns, frame.width as f64, frame.height as f64));
+            let solid = opaque(&frame, op * extra_opacity, bl) && crate::occlusion::covers((frame.width, frame.height), &m, ow, oh);
             out.push(PlanLayer { input, ..PlanLayer::new(frame, m, op * extra_opacity, bl) });
+            out.solid |= solid;
             return;
         }
     }
     // CPU-rendered layer (standard effects): drawn by the GPU as a pre-rendered canvas image.
     let tc = filmcraft_time::format_time(t, seq.settings.frame_rate, seq.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48_000);
     if let Some((img, op2, _)) = crate::item_layer(project, seq, item, t, opts, sources, &tc) {
+        let solid = opts.occlusion && bl == Blend::Normal && op2 * extra_opacity >= 1.0 && (img.w, img.h) == (ow, oh) && img.is_opaque();
         out.push(PlanLayer::new(cpu_frame(img), Affine::IDENTITY, op2 * extra_opacity, bl));
+        out.solid |= solid;
     }
+}
+
+/// Whether a layer drawing `frame` at `opacity` in mode `blend` is opaque wherever it draws.
+fn opaque(frame: &VideoFrame, opacity: f32, blend: Blend) -> bool {
+    blend == Blend::Normal && opacity >= 1.0 && crate::occlusion::frame_is_opaque(frame)
 }
 
 /// Maps a `w`×`h` frame's pixels to the frame turned clockwise by `q` quarter turns, as
@@ -797,7 +896,7 @@ mod tests {
             scale: 1.0,
         }];
         let expected = execute_cpu(&FramePlan::Composite { width: 1, height: 1, steps: steps.clone() });
-        let layers = PlanStack { steps, exhausted: false, cpu_only: false, layers: 1 }.into_layers(1, 1).unwrap();
+        let layers = PlanStack { steps, exhausted: false, cpu_only: false, layers: 1, solid: false }.into_layers(1, 1).unwrap();
         let got = execute_cpu(&FramePlan::Layers { width: 1, height: 1, layers });
         assert_eq!(got.px, expected.px);
         assert!(got.px.iter().any(|v| *v != 0.0));

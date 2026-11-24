@@ -120,3 +120,80 @@ pub fn fixture(name: &str) -> Option<PathBuf> {
     std::fs::rename(&tmp, &path).ok()?;
     Some(path)
 }
+
+// ------------------------------------------------------------------------------ layer fixtures
+
+/// Seconds of every layer fixture (the layer scenarios play 8 s of them).
+pub const LAYER_SECS: u32 = 10;
+
+/// A clip for the multi-layer scenarios (`layers.rs`), generated on first use: `codec` is `h264`,
+/// `hevc10` (Main 10, Rec. 709), `hlg` (Main 10, BT.2020 HLG, as a phone records HDR) or `gfx`
+/// (ProRes 4444 with alpha, a title over a transparent frame); `res` is the picture height (1080
+/// or 2160); `index` picks the picture, so stacked layers differ. 29.97 fps, a keyframe a second.
+///
+/// On macOS the camera codecs are encoded by the hardware encoder (`h264_videotoolbox` /
+/// `hevc_videotoolbox`), whose streams are what phones and action cameras record; elsewhere by
+/// libx264 / libx265.
+pub fn layer_fixture(codec: &str, res: u32, index: usize) -> Option<PathBuf> {
+    let (w, h) = match res {
+        1080 => (1920, 1080),
+        2160 => (3840, 2160),
+        _ => return None,
+    };
+    let ext = if codec == "gfx" { "mov" } else { "mp4" };
+    let name = format!("lay_{codec}_{res}_{index}.{ext}");
+    let dir = fixtures_dir();
+    let path = dir.join(&name);
+    if path.exists() {
+        return Some(path);
+    }
+    let ff = ffmpeg()?;
+    let secs = if codec == "gfx" { 4 } else { LAYER_SECS };
+    let size = format!("s={w}x{h}:r=30000/1001");
+    let hue = (index * 67) % 360;
+    let src = match (codec, index % 3) {
+        // a title: opaque where the test picture is bright, transparent elsewhere
+        ("gfx", _) => format!("testsrc2={size}:d={secs},format=rgba,colorkey=black:0.45:0.05,format=yuva444p10le"),
+        (_, 0) => format!("testsrc2={size}:d={secs},hue=h={hue},noise=alls=5:allf=t"),
+        (_, 1) => format!("mandelbrot={size},trim=duration={secs},hue=h={hue},noise=alls=5:allf=t"),
+        _ => format!("smptehdbars={size}:d={secs},hue=h={hue},noise=alls=8:allf=t+u"),
+    };
+    let mbit = |at_2160: u32| format!("{}M", if res == 2160 { at_2160 } else { at_2160 / 3 });
+    let hw = |enc: &str| cfg!(target_os = "macos") && has_encoder(&ff, enc);
+    let mut codec_args: Vec<String> = match codec {
+        "h264" if hw("h264_videotoolbox") => {
+            vec!["-c:v", "h264_videotoolbox", "-profile:v", "high", "-b:v", &mbit(45), "-pix_fmt", "yuv420p"].into_iter().map(String::from).collect()
+        }
+        "h264" => X264.iter().map(|s| s.to_string()).collect(),
+        "hevc10" | "hlg" if hw("hevc_videotoolbox") => {
+            vec!["-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-b:v", &mbit(24), "-pix_fmt", "p010le", "-tag:v", "hvc1"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        }
+        "hevc10" | "hlg" => X265_MAIN10.iter().map(|s| s.to_string()).collect(),
+        "gfx" => vec!["-c:v", "prores_ks", "-profile:v", "4", "-pix_fmt", "yuva444p10le", "-vendor", "apl0"].into_iter().map(String::from).collect(),
+        _ => return None,
+    };
+    codec_args.extend(["-g", "30"].map(String::from));
+    if codec == "hlg" {
+        codec_args.extend(["-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc"].map(String::from));
+    } else if codec != "gfx" {
+        codec_args.extend(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"].map(String::from));
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    eprintln!("generating {}", path.display());
+    let tmp = dir.join(format!(".{name}.{}.tmp.{ext}", std::process::id()));
+    let mut c = Command::new(ff);
+    c.args(["-v", "error", "-y", "-f", "lavfi", "-i", &src]);
+    c.args(&codec_args);
+    c.args(["-movflags", "+faststart"]);
+    c.arg(&tmp);
+    if !c.status().ok()?.success() {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("  ffmpeg failed for {name} (encoder missing?)");
+        return None;
+    }
+    std::fs::rename(&tmp, &path).ok()?;
+    Some(path)
+}

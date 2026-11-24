@@ -99,6 +99,9 @@ pub struct GpuCompositor {
     pub cpu_adjustments: u64,
     /// Total bytes uploaded (stats).
     pub uploaded_bytes: u64,
+    /// Total time spent making and filling source textures, nanoseconds (stats): the part of a
+    /// composite that grows with the number and size of the layers' frames.
+    pub upload_ns: u64,
 }
 
 fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -185,7 +188,8 @@ pub fn f16_to_f32_fast(h: u16) -> f32 {
 }
 
 /// Half-float texel data for one frame (one byte vector per plane), converted off the UI thread.
-/// 8-bit frames need no conversion and have none.
+/// Only float RGBA frames (pictures the CPU rendered) have any: Y'CbCr planes and 8-bit RGBA upload
+/// as they are.
 #[derive(Clone, Debug, Default)]
 pub struct Prepared {
     planes: Vec<Vec<u8>>,
@@ -225,36 +229,26 @@ fn f32_to_f16_bytes(v: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Half floats of `code / 2^bits` for every 16-bit code (built once per bit depth).
-fn code_table(bits: u32) -> &'static [[u8; 2]] {
-    static TABLES: [std::sync::OnceLock<Vec<[u8; 2]>>; 17] = [const { std::sync::OnceLock::new() }; 17];
-    let bits = bits.min(16);
-    TABLES[bits as usize].get_or_init(|| {
-        let scale = (1u32 << bits) as f32;
-        (0..=u16::MAX as u32).map(|c| f32_to_f16(c as f32 / scale).to_le_bytes()).collect()
-    })
-}
-
-/// `code / 2^bits` as half floats, through a per-code table (same values as converting each sample).
-fn codes_to_f16_bytes(v: &[u16], bits: u32) -> Vec<u8> {
-    let table = code_table(bits);
-    let mut out = vec![0u8; v.len() * 2];
-    out.par_chunks_mut(CHUNK * 2).zip(v.par_chunks(CHUNK)).for_each(|(o, s)| {
-        for (o, c) in o.as_chunks_mut::<2>().0.iter_mut().zip(s) {
-            o.copy_from_slice(&table[*c as usize]);
-        }
-    });
-    out
+/// The samples of a 16-bit plane as the bytes of an `Rg8Unorm` texture: each code's low byte in
+/// the red channel and its high byte in the green one, which is the plane's own memory on a
+/// little-endian machine. The shader puts the two back together (`tap` in `composite.wgsl`), so a
+/// 10-bit picture goes to the GPU without being converted first.
+///
+/// Before, every plane was converted to half floats on the CPU and the plan kept that copy next
+/// to the frame: 25 MB more per 4K layer and frame, and most of the CPU of 10-bit playback.
+fn code_bytes(v: &[u16]) -> std::borrow::Cow<'_, [u8]> {
+    if cfg!(target_endian = "little") {
+        std::borrow::Cow::Borrowed(bytemuck::cast_slice(v))
+    } else {
+        std::borrow::Cow::Owned(v.iter().flat_map(|c| c.to_le_bytes()).collect())
+    }
 }
 
 /// Convert a frame's texels for upload (None when it uploads as it is).
 pub fn prepare_frame(f: &VideoFrame) -> Option<Prepared> {
     match &f.data {
         PixelData::RgbaF32(d) => Some(Prepared { planes: vec![f32_to_f16_bytes(d)] }),
-        PixelData::Yuv16 { planes, bits, alpha, .. } => {
-            Some(Prepared { planes: planes.iter().chain(alpha.as_ref()).map(|p| codes_to_f16_bytes(p, *bits)).collect() })
-        }
-        PixelData::Rgba8(_) | PixelData::Yuv8 { .. } => None,
+        PixelData::Rgba8(_) | PixelData::Yuv8 { .. } | PixelData::Yuv16 { .. } => None,
     }
 }
 
@@ -435,6 +429,7 @@ impl GpuCompositor {
             gpu_adjustments: 0,
             cpu_adjustments: 0,
             uploaded_bytes: 0,
+            upload_ns: 0,
         }
     }
 
@@ -502,6 +497,7 @@ impl GpuCompositor {
         let (w, h) = (f.width, f.height);
         let d0 = self.dummy.clone();
         let dummy = || d0.clone();
+        let upload_started = web_time::Instant::now();
         let up = match &f.data {
             PixelData::Rgba8(d) => {
                 let v = self.plane_texture(w, h, wgpu::TextureFormat::Rgba8UnormSrgb, d, 4);
@@ -557,25 +553,19 @@ impl GpuCompositor {
                 let (sx, sy) = chroma.shifts();
                 let (cw, ch) = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
                 let scale = (1u32 << bits) as f32;
-                let owned;
-                let p = match prep {
-                    Some(p) => p,
-                    None => {
-                        owned = Prepared { planes: planes.iter().chain(alpha.as_ref()).map(|p| codes_to_f16_bytes(p, *bits)).collect() };
-                        &owned
-                    }
-                };
-                let y = self.plane_texture(w, h, wgpu::TextureFormat::R16Float, &p.planes[0], 2);
-                let u = self.plane_texture(cw, ch, wgpu::TextureFormat::R16Float, &p.planes[1], 2);
-                let v = self.plane_texture(cw, ch, wgpu::TextureFormat::R16Float, &p.planes[2], 2);
+                // the codes as they are, two bytes a texel (see `code_bytes`)
+                let packed = wgpu::TextureFormat::Rg8Unorm;
+                let y = self.plane_texture(w, h, packed, &code_bytes(&planes[0]), 2);
+                let u = self.plane_texture(cw, ch, packed, &code_bytes(&planes[1]), 2);
+                let v = self.plane_texture(cw, ch, packed, &code_bytes(&planes[2]), 2);
                 // (full-resolution alpha plane: its codes span 0..2^bits - 1, hence the scale)
-                let a = alpha.as_ref().and_then(|_| p.planes.get(3)).map(|b| self.plane_texture(w, h, wgpu::TextureFormat::R16Float, b, 2));
-                let alpha_scale = if a.is_some() { scale / (scale - 1.0) } else { 0.0 };
+                let a = alpha.as_ref().map(|a| self.plane_texture(w, h, packed, &code_bytes(a), 2));
+                let alpha_scale = if a.is_some() { 1.0 / (scale - 1.0) } else { 0.0 };
                 let _ = Chroma::C420;
                 Uploaded {
                     views: [y, u, v, a.unwrap_or_else(dummy)],
-                    kind: 2,
-                    code_scale: scale,
+                    kind: KIND_YUV_CODES,
+                    code_scale: 1.0,
                     alpha_scale,
                     chroma: (cw, ch),
                     last_used: self.clock,
@@ -583,6 +573,7 @@ impl GpuCompositor {
                 }
             }
         };
+        self.upload_ns = self.upload_ns.saturating_add(u64::try_from(upload_started.elapsed().as_nanos()).unwrap_or(u64::MAX));
         self.uploads.insert(key, up);
         // keep the most recent uploads (enough for several stacked layers + playback lookahead)
         if self.uploads.len() > 24 {
@@ -596,6 +587,11 @@ impl GpuCompositor {
     }
 
     /// The source description of an uploaded frame.
+    /// Whether a source kind is Y'CbCr planes (2: one normalised sample a texel; [`KIND_YUV_CODES`]).
+    fn is_yuv(kind: u32) -> bool {
+        kind >= 2
+    }
+
     fn src_info(&self, f: &VideoFrame, key: (usize, u32, u32)) -> Option<SrcInfo> {
         let up = self.uploads.get(&key)?;
         let code_levels = match &f.data {
@@ -633,9 +629,9 @@ impl GpuCompositor {
     fn uniforms(src: &SrcInfo, m: &filmcraft_geom::Affine, opacity: f32, blend: Blend, out: (u32, u32)) -> [f32; UNIFORM_FLOATS] {
         let (kr, kb) = src.color.matrix.kr_kb();
         let bits_scale = src.code_levels / 256.0; // 2^(bits - 8), independent of texture encoding
-        let (yo, ys, co, cs) = match (src.color.range, src.kind) {
-            (Range::Limited, 2) => (16.0 * bits_scale, 219.0 * bits_scale, 128.0 * bits_scale, 224.0 * bits_scale),
-            (Range::Full, 2) => (0.0, src.code_levels - 1.0, src.code_levels / 2.0, src.code_levels - 1.0),
+        let (yo, ys, co, cs) = match (src.color.range, Self::is_yuv(src.kind)) {
+            (Range::Limited, true) => (16.0 * bits_scale, 219.0 * bits_scale, 128.0 * bits_scale, 224.0 * bits_scale),
+            (Range::Full, true) => (0.0, src.code_levels - 1.0, src.code_levels / 2.0, src.code_levels - 1.0),
             _ => (0.0, 1.0, 0.0, 1.0),
         };
         let transfer = match src.color.transfer {
@@ -809,7 +805,7 @@ impl GpuCompositor {
                 input: None,
             });
             // HDR / wide-gamut Y'CbCr: the planner's input transform, in the shader (#965)
-            let src = SrcInfo { input: l.input.as_ref().filter(|_| src.kind == 2).and_then(|t| t.gpu_params()), ..src };
+            let src = SrcInfo { input: l.input.as_ref().filter(|_| Self::is_yuv(src.kind)).and_then(|t| t.gpu_params()), ..src };
             let views = self.uploads.get(k).map_or_else(|| std::array::from_fn(|_| self.dummy.clone()), |up| up.views.clone());
             let job = match &l.fx {
                 Some(lfx) => {
@@ -1321,9 +1317,15 @@ pub(crate) fn copy_mapped(src: &[u8], line: &mut Vec<u8>) {
 }
 
 /// Shader source: kind (0 RGBA8 sRGB, 1 linear premultiplied RGBA, 2 YUV), sampling scales, dimensions, color.
+/// A source kind (`SrcInfo::kind`, the shader's `u.p0.y`): Y'CbCr planes of 9 to 16 bits whose
+/// texels hold the code's two bytes (`code_bytes`), which the shader reads as the code itself.
+const KIND_YUV_CODES: u32 = 3;
+
 struct SrcInfo {
+    /// 0: sRGB RGBA8, straight alpha. 1: linear premultiplied RGBA16F. 2: 8-bit Y'CbCr planes.
+    /// [`KIND_YUV_CODES`]: Y'CbCr planes of more bits.
     kind: u32,
-    /// Texture sample -> code units: 255 for R8Unorm, 2^bits for R16Float.
+    /// Plane sample -> code units: 255 for R8Unorm, 1 for [`KIND_YUV_CODES`] (already the code).
     code_scale: f32,
     /// YUV quantization levels: 2^bits; R8Unorm's decoding scale is one less.
     code_levels: f32,

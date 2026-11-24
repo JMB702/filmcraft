@@ -80,6 +80,50 @@ What remains per live decoder is unchanged: the H.264 decoder publishes each mac
 picture as its own allocations (`Frame::make_row`, five per row), which is where the 290 MB per
 decoder comes from.
 
+## Results (sequences with several video layers, before → after)
+
+Program-monitor playback of 3840×2160 29.97 fps sequences at 1/2 resolution (the monitor's
+default), GPU path, hardware decoding, `bench_playback --scenario <name> --res half --seconds 6`
+(the stacked clips: 8 s), Apple M2 Max (12 cores), 2026-11-23, load average 7 to 20 from other
+builds. Frames shown of the frames due; CPU cores the play needed at the sequence frame rate.
+
+| Scenario | shown before → after | cores before → after |
+|---|---|---|
+| `cover-h264-2160-4` (4 stacked H.264 clips, one visible) | 240 / 240 → 240 / 240 | 0.66 → **0.23** |
+| `cover-hevc10-2160-1` (one HEVC 10-bit clip) | 240 / 240 → 240 / 240 | 0.88 → **0.28** |
+| `cover-hevc10-2160-2` | 181 / 240 → **240** / 240 | 3.50 → **0.28** |
+| `cover-hevc10-2160-4` | 110 / 240 → **240** / 240 | 4.11 → **0.29** |
+| `pip-h264-2160-4` (4 visible H.264 layers) | 179 / 180 → 180 / 180 | 0.69 → 0.67 |
+| `pip-hevc10-2160-2` (2 visible HEVC 10-bit layers) | 162 / 180 → **180** / 180 | 4.27 → **0.46** |
+| `pip-hevc10-2160-4` | 66 / 180 → **180** / 180 | 5.61 → **0.82** |
+| `mcam-broll-hevc10-2160-2` (multicam angle over another) | 164 / 180 → **180** / 180 | 4.76 → **0.29** |
+| `nest-pip-hevc10-2160-3` (nest under a picture-in-picture) | 113 / 180 → **180** / 180 | 4.82 → **0.63** |
+| `gfx-h264-2160-2` (ProRes 4444 title over a clip) | 106 / 180 → **180** / 180 | 9.95 → **1.85** |
+| `samefile-h264-2160-2` (one file at two places) | 16 / 180 → **179** / 180 | 0.63 → 0.40 |
+| `mcam-punch-h264-2160-2` (multicam clip at 125 %) | 173 / 180 → 180 / 180 | 8.56 → 4.98 |
+| `mcam-fx-h264-2160-2` (multicam clip with Tint + Noise) | 113 / 180 → 172 / 180 | 10.86 → 11.23 |
+
+What changed:
+
+1. **The plan cache keeps the frames due next.** It evicted by age, and while playing the frames
+   due next are the oldest. Once the read-ahead (14 frames) no longer fit its 1 GB (a frame of
+   two 4K 10-bit layers held 100 MB) they were given up for frames further ahead and planned
+   again: 1656 plans for 240 frames. Plans of other views now go first, then frames behind the
+   playhead, then the farthest ahead, and playback asks for no more frames ahead than fit
+   (`perf.stats` `frames.planReadAhead`, `frames.plansEvictedAhead`).
+2. **Hidden tracks are not drawn** (`filmcraft_render::occlusion`): the tracks under a clip that
+   covers the frame, opaque and in Normal mode, are neither decoded nor uploaded. The picture is
+   the same; exports and paused frames use the same rule.
+3. **Planes of more than 8 bits upload as they are.** They were converted to half floats on the
+   CPU for every layer of every frame and the plan kept the copy (25 MB more per 4K 10-bit
+   layer). The shader now reads the code from the plane's own two bytes.
+4. **A decoder per place of a file.** Two clips of one file showing at once made its one decoder
+   seek for every frame (90 restarts in 6 s); each place now keeps its own.
+
+Still on the CPU: a multicam or nested clip with Motion or effects is rendered there as one
+picture (`mcam-punch`, `mcam-fx`). A multicam punch-in holds the frame rate at 5 cores; Tint +
+Noise on a 4K multicam clip does not quite (Noise has no GPU version).
+
 ## Results (VideoToolbox export takes the RGBA pictures as they are, #3030, before → after)
 
 Export ▸ Hardware encoding on macOS handed VideoToolbox NV12 planes converted on the CPU by the

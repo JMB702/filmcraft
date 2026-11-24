@@ -360,8 +360,29 @@ cargo xtask bench-playback --json target/bench-playback.json # machine-readable 
 | `after-preview` | 1080p H.264 + Color Grading/Sharpen/Levels/Tint: a live play, Render In to Out, then two plays of the green segment |
 | `seek-storm` | 40 jumps to random frames 150 ms apart (scrubbing), time until the exact frame shows |
 
+Sequences with several video layers are named `<shape>-<codec>-<res>-<n>` (`--scenario layers`
+runs the whole matrix; `crates/ui-egui/examples/bench/layers.rs`): `codec` is `h264`, `hevc10`
+(Main 10) or `hlg` (Main 10, BT.2020 HLG), `res` 1080 or 2160 (the sequence is that size, 29.97
+fps), `n` 1 to 4. On macOS the clips are made by the hardware encoders, whose streams are what
+phones and action cameras record.
+
+| Shape | What plays |
+|---|---|
+| `cover` | `n` full-frame opaque clips stacked (B-roll over the main camera: only the top one shows) |
+| `pip` | V1 full frame, the clips above at 50 % in the corners (every layer shows) |
+| `mcam`, `mcam-broll`, `mcam-punch`, `mcam-fx` | a multicam nest with one track per camera: one multicam clip, a second angle over it, a punch-in (125 %), Tint + Noise on the clip |
+| `nest-pip` | a plain nested sequence under a picture-in-picture clip |
+| `fx` | `pip` with Lumetri Color on V1 and Tint above |
+| `gfx` | a full-frame ProRes 4444 title with alpha over the clips |
+| `samefile` | one clip twice at once, the second from four seconds later in the file |
+| `edit` | multicam clips of a two-camera nest, tinted B-roll, a title and a punch-in |
+
+`--project file.fcproj --sequence NAME --at 12.5,300` plays places of a real project instead (the
+file is opened as the app opens it and only read).
+
 Options: `--res full,half,quarter`, `--cpu` (CPU compositor + texture conversion instead of the
-GPU path), `--seconds`, `--refresh` (display Hz), `--workers`, `--repeat`, `--json <file>`.
+GPU path), `--hw auto|off` (Settings ▸ Playback ▸ Hardware decoding; `auto` as the app),
+`--seconds`, `--refresh` (display Hz), `--workers`, `--repeat`, `--json <file>`.
 Fixtures are made with ffmpeg in `target/fixtures/playback/` (set `FILMCRAFT_FIXTURES` to share one
 set between worktrees).
 
@@ -372,7 +393,9 @@ screen at a refresh while it was due; frames passed over without a refresh count
 (decode) wall and thread CPU per job; **ui** = time on the UI thread to present a frame (GPU upload
 and draw, or texture conversion); **cpu ms/f** = process CPU per frame and **cores** = the cores that
 needs at the sequence frame rate; **seeks/dec** = decoder restarts and samples decoded; **waste** =
-jobs for frames that were never due.
+jobs for frames that were never due; **upl** = the part of **ui** that makes and fills source
+textures; **lyrs** / **planMB** = layers and MB of a presented frame plan; **hw/sw** = pictures
+decoded by the OS hardware decoder / in software; **live** = most decoders alive at once.
 
 Wall-clock columns (shown/drop, ontime, latencies) depend on machine load, so each row prints the
 load average. CPU columns (thread and process CPU time) and the structural counters (seeks,

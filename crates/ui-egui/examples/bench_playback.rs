@@ -4,6 +4,8 @@
 
 #[path = "bench/fixtures.rs"]
 mod fixtures;
+#[path = "bench/layers.rs"]
+mod layers;
 #[path = "bench/playback.rs"]
 mod playback;
 

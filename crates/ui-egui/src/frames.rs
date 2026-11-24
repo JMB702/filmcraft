@@ -193,6 +193,12 @@ pub struct FrameStats {
     pub job_ms: f64,
     /// The most recent jobs: (source ms, render ms).
     pub recent: VecDeque<(f32, f32)>,
+    /// GPU plans given up while still ahead of the playhead: frames that were made and not shown
+    /// (the read-ahead did not fit the plan cache). Zero while playback keeps what it prepares.
+    pub plans_evicted_ahead: u64,
+    /// Frames from the playhead on that the playing view's plans fit in the plan cache
+    /// (0: nothing plays on the GPU path).
+    pub plan_read_ahead: i64,
 }
 
 impl FrameStats {
@@ -216,6 +222,7 @@ impl FrameStats {
             "decodeMs": {"mean": self.source_ms / n, "p50": pct(&|r| r.0, 0.5), "p95": pct(&|r| r.0, 0.95)},
             "renderMs": {"mean": self.render_ms / n, "p50": pct(&|r| r.1, 0.5), "p95": pct(&|r| r.1, 0.95)},
             "jobMsMean": self.job_ms / n,
+            "plansEvictedAhead": self.plans_evicted_ahead, "planReadAhead": self.plan_read_ahead,
         })
     }
 }
@@ -343,17 +350,48 @@ impl GpuPlan {
     }
 }
 
-/// Finished plans, bounded by count and bytes (oldest use evicted first).
-#[derive(Default)]
+/// Finished plans, bounded by count and bytes.
+///
+/// While a view plays ([`Self::focus`]) the plans it is about to show are the last to go: first
+/// the plans of other views (oldest use first), then the frames the playhead has passed (farthest
+/// first), and only then frames ahead of it, farthest first. Evicting by age alone threw away the
+/// frames due next whenever the read-ahead did not fit the budget, since those were made first: a
+/// frame of two 4K 10-bit layers holds 100 MB, ten of those fill the budget, and playback asks for
+/// fourteen frames ahead, so every frame was planned (and its layers converted) several times and
+/// a quarter of them came too late. Without a playing view the oldest use goes first, as before.
 struct PlanCache {
     map: HashMap<FrameKey, (Arc<GpuPlan>, u64, usize)>,
     clock: u64,
     bytes: usize,
+    budget: usize,
+    /// The frame due in the view that plays, and its direction (1, or -1 in reverse).
+    focus: Option<(FrameKey, i64)>,
+    /// Bytes of one plan of the playing view: the largest lately (it rises at once and falls
+    /// slowly), which sizes the read-ahead ([`Self::read_ahead`]).
+    plan_bytes: usize,
+    /// Plans evicted while they were still ahead of the playhead (`perf.stats`): work thrown away.
+    evicted_ahead: u64,
+}
+
+impl Default for PlanCache {
+    fn default() -> Self {
+        Self { map: HashMap::new(), clock: 0, bytes: 0, budget: Self::BUDGET, focus: None, plan_bytes: 0, evicted_ahead: 0 }
+    }
+}
+
+/// Whether two keys are frames of one view: the same target at the same size and decode quality.
+fn same_view(a: &FrameKey, b: &FrameKey) -> bool {
+    a.target == b.target && a.size == b.size && a.draft == b.draft
 }
 
 impl PlanCache {
     const MAX: usize = 96;
     const BUDGET: usize = 1 << 30;
+    /// Frames just behind the playhead that are kept like the frame due: the monitor shows the
+    /// nearest earlier frame while the one due is not ready.
+    const KEEP_BEHIND: i64 = 2;
+    /// Plans that stay whatever they hold, so a frame larger than the budget still shows.
+    const MIN_PLANS: usize = 3;
 
     fn get(&mut self, k: &FrameKey) -> Option<Arc<GpuPlan>> {
         self.clock += 1;
@@ -364,22 +402,58 @@ impl PlanCache {
         })
     }
 
+    /// Playback shows `key` now, moving in direction `dir`.
+    fn set_focus(&mut self, key: FrameKey, dir: i64) {
+        if !self.focus.is_some_and(|(f, _)| same_view(&f, &key)) {
+            self.plan_bytes = 0;
+        }
+        self.focus = Some((key, if dir < 0 { -1 } else { 1 }));
+    }
+
+    /// Frames from the playhead on (how many the view that plays `key` can have ready at once):
+    /// what the budget holds of its plans, less the frames kept behind the playhead. `None` until a
+    /// plan of the view has been made.
+    fn read_ahead(&self, key: &FrameKey) -> Option<i64> {
+        if self.plan_bytes == 0 || !self.focus.is_some_and(|(f, _)| same_view(&f, key)) {
+            return None;
+        }
+        let fit = (self.budget / self.plan_bytes).min(Self::MAX) as i64;
+        Some((fit - Self::KEEP_BEHIND - 1).max(Self::MIN_PLANS as i64 - 1))
+    }
+
+    /// Where `k` stands in the order plans are given up (the smallest goes first).
+    fn rank(&self, k: &FrameKey, used: u64) -> (u8, i64, u64) {
+        match self.focus {
+            Some((f, dir)) if same_view(&f, k) => {
+                let d = (k.frame - f.frame).saturating_mul(dir);
+                if d < -Self::KEEP_BEHIND { (1, d, used) } else { (2, -d.max(0), used) }
+            }
+            _ => (0, 0, used),
+        }
+    }
+
     fn insert(&mut self, k: FrameKey, p: GpuPlan) {
         self.clock += 1;
         let b = p.bytes();
+        if self.focus.is_some_and(|(f, _)| same_view(&f, &k)) {
+            self.plan_bytes = if b >= self.plan_bytes { b } else { self.plan_bytes - (self.plan_bytes - b) / 4 };
+        }
         self.bytes += b;
         if let Some((_, _, old)) = self.map.insert(k, (Arc::new(p), self.clock, b)) {
             self.bytes -= old;
         }
-        if self.map.len() > Self::MAX || self.bytes > Self::BUDGET {
-            let mut v: Vec<(u64, FrameKey, usize)> = self.map.iter().map(|(k, v)| (v.1, *k, v.2)).collect();
+        if self.map.len() > Self::MAX || self.bytes > self.budget {
+            let mut v: Vec<((u8, i64, u64), FrameKey, usize)> = self.map.iter().map(|(k, v)| (self.rank(k, v.1), *k, v.2)).collect();
             v.sort_unstable_by_key(|x| x.0);
-            for (_, k, b) in v {
-                if self.map.len() <= Self::MAX && self.bytes <= Self::BUDGET {
+            for (rank, k, b) in v {
+                if (self.map.len() <= Self::MAX && self.bytes <= self.budget) || self.map.len() <= Self::MIN_PLANS {
                     break;
                 }
                 self.map.remove(&k);
                 self.bytes -= b;
+                if rank.0 == 2 && rank.1 < 0 {
+                    self.evicted_ahead += 1;
+                }
             }
         }
     }
@@ -553,7 +627,16 @@ impl FrameServer {
 
     /// Cumulative job statistics (`perf.stats`).
     pub fn stats(&self) -> FrameStats {
-        self.shared.stats.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        let mut st = self.shared.stats.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let plans = self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner);
+        st.plans_evicted_ahead = plans.evicted_ahead;
+        st.plan_read_ahead = plans.focus.and_then(|(f, _)| plans.read_ahead(&f)).unwrap_or(0);
+        st
+    }
+
+    /// Bytes the GPU plan cache may hold (it keeps a few plans whatever they hold).
+    pub fn set_plan_budget(&self, bytes: usize) {
+        self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner).budget = bytes.max(16 << 20);
     }
 
     /// Worker threads.
@@ -626,6 +709,13 @@ impl FrameServer {
     /// [`SCRUB_KEEP_S`] before it as not wanted: a decoder seeking from a keyframe skips their
     /// non-reference pictures, while nearby frames stay decoded (and cached) for scrubbing back.
     pub fn request(&self, key: FrameKey, time: Tick, scale: f32, project: &Arc<Project>, prio: u32) {
+        if prio == 0 && matches!(key.target, Target::SequencePlan(..)) {
+            // not playing: the plan cache goes back to keeping what was used last
+            let mut plans = self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner);
+            if plans.focus.is_some_and(|(f, _)| f.target == key.target) {
+                plans.focus = None;
+            }
+        }
         let late = (prio == 0).then(|| Tick::from_seconds_f64(SCRUB_KEEP_S));
         self.request_job(FrameRequest { key, time, scale, project, priority: prio, prefetch: false, catch_up: late });
     }
@@ -691,6 +781,15 @@ impl FrameServer {
         let step = speed.abs().max(1.0) as i64;
         let fps = rate.as_f64() * speed.abs().max(1.0) / step as f64;
         let (lead, stride) = if preroll { (1, 1) } else { playback_plan(self.render_cost(), fps, self.shared.workers) };
+        // The plan cache keeps the frames from here on, and says how many of them it can hold:
+        // asking for more would only make frames it has to give up again.
+        let fits = if matches!(key.target, Target::SequencePlan(..)) {
+            let mut plans = self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner);
+            plans.set_focus(key, dir);
+            plans.read_ahead(&key)
+        } else {
+            None
+        };
         if lead <= 1 {
             // the frame due now; once the clock runs, the frames before it are late
             self.request_job(FrameRequest {
@@ -706,6 +805,7 @@ impl FrameServer {
         // During preroll the clock has not started: only the frames that gate start, not a
         // prefetch run that walks the rest of a LongGOP and evicts the playhead pictures.
         let ahead = if preroll { (PREROLL_FRAMES - 1).max(0) } else { prefetch_depth(speed) };
+        let ahead = fits.map_or(ahead, |n| ahead.min(n));
         for i in 0..ahead {
             let f = key.frame + (lead + i * stride) * dir * step;
             if f >= 0 {
@@ -738,7 +838,10 @@ impl FrameServer {
     /// are ready.
     pub fn preroll_ready(&self, key: FrameKey, speed: f64, last: i64) -> bool {
         let step = (speed.abs().max(1.0) as i64) * if speed < 0.0 { -1 } else { 1 };
-        (0..PREROLL_FRAMES).map(|i| key.frame + i * step).filter(|f| *f >= 0 && *f <= last).all(|f| self.is_ready(&FrameKey { frame: f, ..key }))
+        // no more frames than the plan cache holds at once, or the start would wait for the timeout
+        let fits = self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner).read_ahead(&key);
+        let frames = fits.map_or(PREROLL_FRAMES, |n| PREROLL_FRAMES.min(n + 1));
+        (0..frames).map(|i| key.frame + i * step).filter(|f| *f >= 0 && *f <= last).all(|f| self.is_ready(&FrameKey { frame: f, ..key }))
     }
 
     /// The current per-frame render cost estimate (s), see [`playback_plan`].
@@ -766,6 +869,7 @@ impl FrameServer {
     /// Playback stopped: drop its queued prefetch jobs and cancel the running ones (left alone,
     /// they would keep the workers busy, e.g. rendering effects for frames nobody will see).
     pub fn stop_prefetch(&self) {
+        self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner).focus = None;
         self.shared.queue.lock().unwrap_or_else(PoisonError::into_inner).retain(|j| !j.prefetch);
         for (_, c, prefetch) in self.shared.in_flight.lock().unwrap_or_else(PoisonError::into_inner).iter() {
             if *prefetch {
@@ -1151,6 +1255,8 @@ fn render_job(job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Services>, pr
 mod tests {
     use super::{FrameKey, PlaybackMeter, Target, background_work, playback_plan, recent_keys};
     use filmcraft_project::ItemId;
+    use filmcraft_render::plan::{DeviceCaps, FramePlan};
+    use std::sync::Arc;
 
     #[test]
     fn only_item_thumbnails_are_background_work() {
@@ -1375,5 +1481,113 @@ mod tests {
             matches!(&all.plan, FramePlan::Composite { steps, .. } if steps.iter().any(|st| matches!(st, PlanStep::Adjust { .. }))),
             "an effect stage: the adjustment layer is a step of the plan"
         );
+    }
+    /// A plan holding `mb` MB (one float layer).
+    fn plan_of(mb: usize) -> super::GpuPlan {
+        let (w, h) = (256u32, (mb * 256) as u32);
+        let frame = Arc::new(filmcraft_frame::VideoFrame::rgba_f32(w, h, vec![0.0; (w * h * 4) as usize]));
+        let layer = filmcraft_render::plan::PlanLayer::new(frame, filmcraft_geom::Affine::IDENTITY, 1.0, filmcraft_render::Blend::Normal);
+        let plan = FramePlan::Layers { width: 16, height: 16, layers: vec![layer] };
+        super::GpuPlan { plan, prepared: Default::default() }
+    }
+
+    fn plan_key(frame: i64) -> FrameKey {
+        FrameKey { target: Target::SequencePlan(ItemId(1), DeviceCaps::ALL), frame, size: 500, revision: 3, draft: false }
+    }
+
+    fn cached(c: &super::PlanCache) -> Vec<i64> {
+        let mut v: Vec<i64> = c.map.keys().map(|k| k.frame).collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// The read-ahead of a frame of several large layers does not fit the plan cache. Evicting the
+    /// oldest plan gave up the frames due next (they were made first) for the ones farthest
+    /// ahead, so each was planned again and again: with ten plans fitting and fourteen asked
+    /// for, a play of two 4K 10-bit layers made 1656 plans for 240 frames and dropped 59.
+    #[test]
+    fn a_playing_view_keeps_the_frames_due_next() {
+        let mut c = super::PlanCache { budget: 10 << 20, ..Default::default() };
+        c.set_focus(plan_key(100), 1);
+        // playback asks for the frame due and fourteen ahead; they finish in order
+        for f in 100..=114 {
+            c.insert(plan_key(f), plan_of(1));
+        }
+        assert_eq!(cached(&c), (100..=109).collect::<Vec<_>>(), "the ten frames nearest the playhead stay");
+        assert_eq!(c.evicted_ahead, 5);
+        // ...and the cache says how far ahead its budget reaches, so playback stops asking for more
+        assert_eq!(c.read_ahead(&plan_key(100)), Some(10 - super::PlanCache::KEEP_BEHIND - 1));
+    }
+
+    /// Asking only for what [`PlanCache::read_ahead`] says fits, playback never loses a frame it
+    /// made: frames behind the playhead make room for the ones ahead.
+    #[test]
+    fn the_read_ahead_that_fits_is_never_evicted() {
+        let mut c = super::PlanCache { budget: 10 << 20, ..Default::default() };
+        for due in 100..200 {
+            c.set_focus(plan_key(due), 1);
+            let ahead = c.read_ahead(&plan_key(due)).unwrap_or(14);
+            for f in due..=due + ahead {
+                if !c.map.contains_key(&plan_key(f)) {
+                    c.insert(plan_key(f), plan_of(1));
+                }
+            }
+            if due > 100 {
+                assert!(c.map.contains_key(&plan_key(due)), "frame {due} is ready when it is due");
+            }
+        }
+        // the first pass asked for fourteen before a plan's size was known: those five, no more
+        assert_eq!(c.evicted_ahead, 5);
+        assert!(c.bytes <= c.budget);
+        // the two frames just shown are kept for the monitor to fall back on
+        assert!(c.map.contains_key(&plan_key(198)) && c.map.contains_key(&plan_key(197)));
+    }
+
+    #[test]
+    fn reverse_play_keeps_the_frames_before_the_playhead() {
+        let mut c = super::PlanCache { budget: 6 << 20, ..Default::default() };
+        c.set_focus(plan_key(100), -1);
+        for f in (90..=100).rev() {
+            c.insert(plan_key(f), plan_of(1));
+        }
+        assert_eq!(cached(&c), (95..=100).collect::<Vec<_>>());
+    }
+
+    /// Plans of another view (another sequence, size or the frame a paused monitor showed) go
+    /// before any frame of the view that plays, oldest use first; with nothing playing the oldest
+    /// use goes first, as it always did.
+    #[test]
+    fn other_views_go_first_and_a_paused_cache_evicts_by_age() {
+        let mut c = super::PlanCache { budget: 4 << 20, ..Default::default() };
+        let other = |frame| FrameKey { size: 1000, ..plan_key(frame) };
+        c.insert(other(7), plan_of(1));
+        c.insert(other(8), plan_of(1));
+        c.set_focus(plan_key(50), 1);
+        for f in 50..=52 {
+            c.insert(plan_key(f), plan_of(1));
+        }
+        assert!(!c.map.contains_key(&other(7)) && c.map.contains_key(&other(8)), "the other view's oldest plan went");
+        c.insert(plan_key(53), plan_of(1));
+        assert_eq!(cached(&c), vec![50, 51, 52, 53]);
+        assert_eq!(c.evicted_ahead, 0);
+        // paused: least recently used first
+        c.focus = None;
+        assert!(c.get(&plan_key(50)).is_some());
+        c.insert(plan_key(90), plan_of(1));
+        assert_eq!(cached(&c), vec![50, 52, 53, 90]);
+    }
+
+    /// A frame that alone is larger than the budget is still cached, or it could never be shown.
+    #[test]
+    fn plans_larger_than_the_budget_still_show() {
+        let mut c = super::PlanCache { budget: 2 << 20, ..Default::default() };
+        c.set_focus(plan_key(10), 1);
+        for f in 10..=14 {
+            c.insert(plan_key(f), plan_of(3));
+        }
+        assert_eq!(cached(&c), vec![10, 11, 12]);
+        assert_eq!(c.read_ahead(&plan_key(10)), Some(super::PlanCache::MIN_PLANS as i64 - 1));
+        // another view says nothing about this one's plans
+        assert_eq!(c.read_ahead(&FrameKey { size: 1000, ..plan_key(10) }), None);
     }
 }

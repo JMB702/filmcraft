@@ -355,7 +355,17 @@ fn a_nest_that_is_not_plain_is_still_drawn_right() {
         s.video_tracks[0].items.push(below);
         s.video_tracks[1].items.push(nest_clip);
         change(&mut r, inner, outer, nest);
-        assert_eq!(layer_count(&r, outer, t), Some(2), "{what}: the matte and one image of the nest");
+        // every track drawn (the nest's own picture can cover the matte, which is then left out:
+        // `occlusion`), so that the count says how the nest itself was planned
+        let all = RenderOptions { occlusion: false, ..Default::default() };
+        let layers = match plan::plan_frame(&r.p, outer, t, all, plan::DeviceCaps::ALL, &r.map) {
+            plan::FramePlan::Layers { layers, .. } => Some(layers.len()),
+            _ => None,
+        };
+        assert_eq!(layers, Some(2), "{what}: the matte and one image of the nest");
+        // a nest whose picture stays opaque over the whole frame hides the matte under it
+        let hidden = matches!(what, "a blend mode inside the nest");
+        assert_eq!(layer_count(&r, outer, t), Some(if hidden { 1 } else { 2 }), "{what}: with hidden tracks left out");
         let w = worst(&r.planned(outer, t), &r.frame(outer, t));
         assert!(w < 0.01, "{what}: plan and reference differ by {w}");
     }

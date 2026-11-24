@@ -718,6 +718,33 @@ impl FxOp {
     }
 
     /// The CPU reference.
+    /// Whether the op only changes colours: a working image that is opaque everywhere stays so
+    /// (every such op goes through [`Image::map_rgb`], which leaves alpha alone). An opaque clip
+    /// with only these ops still covers what is under it ([`crate::occlusion`]).
+    pub fn keeps_alpha(&self) -> bool {
+        matches!(
+            self,
+            FxOp::BrightnessContrast { .. }
+                | FxOp::ProcAmp { .. }
+                | FxOp::Tint { .. }
+                | FxOp::BlackWhite
+                | FxOp::ColorBalance { .. }
+                | FxOp::ThreeWay { .. }
+                | FxOp::LeaveColor { .. }
+                | FxOp::ChangeToColor { .. }
+                | FxOp::ColorPass { .. }
+                | FxOp::Gamma { .. }
+                | FxOp::Levels { .. }
+                | FxOp::Posterize { .. }
+                | FxOp::AscCdl { .. }
+                | FxOp::ChannelMix { .. }
+                | FxOp::ColorReplace { .. }
+                | FxOp::Vignette { .. }
+                | FxOp::VideoLimiter { .. }
+                | FxOp::Lumetri { .. }
+        )
+    }
+
     pub fn apply(&self, img: &mut Image) {
         if img.w == 0 || img.h == 0 {
             return;
