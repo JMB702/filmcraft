@@ -216,16 +216,18 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: Val
 /// command does this: a caller that names a time, name or other field still adds a marker, and
 /// automation through `engine.execute` (`invoke_command`) is unchanged.
 fn edit_marker_at_playhead(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<u64> {
-    if id != "markers.add" || params.as_object().is_some_and(|o| o.keys().any(|k| !matches!(k.as_str(), "monitor" | "target"))) {
+    if id != "markers.add" || params.as_object().is_some_and(|o| o.keys().any(|k| !matches!(k.as_str(), "monitor" | "target" | "selection"))) {
         return None;
     }
+    // with clips selected under the playhead, M marks those clips: their clip marker on this frame
+    let clips = params.get("selection").and_then(Value::as_bool) != Some(false);
     let source = match params.get("target").and_then(Value::as_str) {
         Some("source") => true,
         Some("program") => false,
         Some(_) => return None,
         None => targets_source(app, params),
     };
-    let (marker, owner) = crate::panels::marker_properties::at_playhead(app, source)?;
+    let (marker, owner) = crate::panels::marker_properties::at_playhead(app, source, clips)?;
     crate::panels::marker_properties::open_owned(app, &marker, owner);
     Some(marker.id.0)
 }

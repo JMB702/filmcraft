@@ -175,6 +175,35 @@ the gap's time…", Premiere's "media is in the way"), or when clips that would 
 clips on an unlocked track that is not sync-locked and would go out of sync. Sequence ▸ Close Gap
 with no gap selected closes every gap between In and Out instead.
 
+**Clip markers** (`crates/engine/src/clip_markers.rs`): as in Premiere, a clip marker belongs to the
+clip's source. A clip of a media file (or subclip) shows the markers of its master clip, the media
+item, that fall inside the part of the media it plays; a nest clip shows the sequence markers of the
+sequence it plays, at the matching times and trimmed to the part it plays. Nest markers are worked
+out from the nested sequence every time, never copied, so every nest clip of a sequence shows a change
+made inside it at once. Markers stored on the clip itself (from FCP XML, OTIO, AAF or `.prproj` clips)
+show too. All of them are in source time, so they move with the clip on move, trim, ripple, razor and
+paste. `markers.add` (M, Markers ▸ Add Marker, the Timeline's Add Marker button) with clips selected
+under the playhead adds one marker to each of those clips' sources,
+at the source time the clip shows there, in one "Add Marker" undo step: linked sound shares its
+picture's marker, a nest clip's goes into the nested sequence as a sequence marker, and a clip whose
+source can't hold markers (graphics, adjustment layers) keeps it on the clip. A call that names a
+time (`time`, `frame`, `seconds`, `timecode`) adds a sequence marker there, as before, whatever is
+selected, unless it passes `selection: true` (the selected clips under that time) or `clips: [id]`
+(those clips, each of which must be under the time). `selection: false` (the ruler's Add Marker)
+always adds a sequence marker. With nothing selected, or no selected clip under the playhead, M adds
+a sequence marker as before. The reply lists `markers`, `clips` and each marker's
+`homes` (the `markers.edit` parameters that address it). M on a frame where a selected clip already
+has a marker opens that marker. `sequence.inspect` gives each clip `markers`: `{id, home:
+"source"|"nest"|"clip", owner, start, startFrame, duration, sourceStart, sourceDuration, kind, name,
+comment, color, author, url}` (`start` and `duration` in sequence ticks on that clip; `owner` the
+media item, nested sequence or clip). Edit or delete one with `markers.edit` / `markers.delete` and
+`{target: "source", item}` (master clip), `{target: "program", sequence}` (nest) or `{target:
+"clip", clip}` (the clip's own). Go to Next / Previous Marker stop at the sequence markers and the
+selected clips' markers. With clips selected, Clear Selected Marker clears their clip marker at the
+playhead's frame (or the sequence marker there when they have none) and Clear Markers clears the
+markers they show, leaving sequence markers; with nothing selected both clear sequence markers.
+The Markers panel's Source scope lists the master clip's markers, timeline-added ones included.
+
 **Trim mode** (`crates/engine/src/trim.rs`): `trim.selectEditPoint` / `trim.selectNearest` enter trim
 mode (the Program monitor becomes the Trim Monitor, ids `trimMonitor.*`); `trim.monitor` returns what
 it shows. With Linked Selection on, selecting an edge includes its unlocked linked partners, even

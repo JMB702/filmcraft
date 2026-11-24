@@ -3306,10 +3306,14 @@ fn build() -> Vec<CommandSpec> {
             "Add Marker",
             ["Markers"],
             Some("M"),
-            r#"{"target":"program|source","time":ticks?,"name":str?,"comment":str?,"color":label_or_hex?,"author":str?,"durationFrames":i64?}"#,
+            r#"{"target":"program|source","time":ticks?,"name":str?,"comment":str?,"color":label_or_hex?,"author":str?,"durationFrames":i64?,"clips":[id]?,"selection":bool?} (program: with no time, the selected clips under the playhead get a clip marker on their source; a time, no such clip or selection:false adds a sequence marker; clips or selection:true mark clips at the time)"#,
             always,
             |s, p| {
                 if let Some(v) = crate::source_monitor::route(s, "markers.add", p)? {
+                    return Ok(v);
+                }
+                // M: the selected clips under the playhead (or named clips) take a clip marker on their source
+                if let Some(v) = crate::clip_markers::add(s, p)? {
                     return Ok(v);
                 }
                 let (_seq, ph) = marker_list_mut(s)?;
@@ -3345,7 +3349,7 @@ fn build() -> Vec<CommandSpec> {
             }
             let t = s.playhead();
             s.active_sequence().ok_or(EngineError::NoSequence)?;
-            if let Some(m) = s.active_sequence().and_then(|q| q.markers.iter().map(|m| m.start).find(|m| *m > t)) {
+            if let Some(m) = crate::clip_markers::stops(s).into_iter().find(|m| *m > t) {
                 s.set_playhead(m);
             }
             Ok(Value::Null)
@@ -3356,13 +3360,16 @@ fn build() -> Vec<CommandSpec> {
             }
             let t = s.playhead();
             s.active_sequence().ok_or(EngineError::NoSequence)?;
-            if let Some(m) = s.active_sequence().and_then(|q| q.markers.iter().rev().map(|m| m.start).find(|m| *m < t)) {
+            if let Some(m) = crate::clip_markers::stops(s).into_iter().rev().find(|m| *m < t) {
                 s.set_playhead(m);
             }
             Ok(Value::Null)
         }),
         cmd!("markers.clearCurrent", "Clear Selected Marker", ["Markers"], Some("Cmd+Alt+M"), r#"{"target":"program|source"}"#, always, |s, p| {
             if let Some(v) = crate::source_monitor::route(s, "markers.clearCurrent", p)? {
+                return Ok(v);
+            }
+            if let Some(v) = crate::clip_markers::clear(s, false)? {
                 return Ok(v);
             }
             let t = s.playhead();
@@ -3385,6 +3392,9 @@ fn build() -> Vec<CommandSpec> {
             if let Some(v) = crate::source_monitor::route(s, "markers.clearAll", p)? {
                 return Ok(v);
             }
+            if let Some(v) = crate::clip_markers::clear(s, true)? {
+                return Ok(v);
+            }
             s.edit_sequence("Clear All Markers", |q, _, _| {
                 q.markers.clear();
                 Ok(())
@@ -3396,7 +3406,7 @@ fn build() -> Vec<CommandSpec> {
             "Edit Marker…",
             [],
             None,
-            r#"{"target":"program|source","sequence":id?,"item":id?,"marker":id|"markers":[id],"time":ticks?,"frame":i64?,"durationFrames":i64?,"name":str?,"comment":str?,"author":str?,"url":str?,"color":label_or_hex?,"kind":"comment|chapter|segmentation|webLink|flashCue"?}"#,
+            r#"{"target":"program|source|clip","sequence":id?,"item":id?,"clip":id?,"marker":id|"markers":[id],"time":ticks?,"frame":i64?,"durationFrames":i64?,"name":str?,"comment":str?,"author":str?,"url":str?,"color":label_or_hex?,"kind":"comment|chapter|segmentation|webLink|flashCue"?}"#,
             always,
             |s, p| crate::marker_edit::run(s, p, false)
         ),
@@ -3405,7 +3415,7 @@ fn build() -> Vec<CommandSpec> {
             "Delete Markers",
             [],
             None,
-            r#"{"target":"program|source","sequence":id?,"item":id?,"marker":id|"markers":[id]}"#,
+            r#"{"target":"program|source|clip","sequence":id?,"item":id?,"clip":id?,"marker":id|"markers":[id]}"#,
             always,
             |s, p| crate::marker_edit::run(s, p, true)
         ),
@@ -5467,6 +5477,7 @@ pub fn inspect_sequence(s: &Session, id: ItemId, q: &filmcraft_project::Sequence
                 "startFrame": rate.frame_at(i.start), "durationFrames": rate.frame_at(i.duration), "sourceIn": i.source_in.0, "speed": i.speed, "reverse": i.reverse, "maintainPitch": i.maintain_pitch,
                 "end": i.end().0, "endFrame": rate.frame_at(i.end()), "sourceOut": i.source_out().0, "gainDb": i.gain_db,
                 "enabled": i.enabled, "link": i.link, "label": i.label.name(), "customLabelColor": i.custom_label_color,
+                "markers": crate::clip_markers::clip_markers(&s.project, q, i).iter().map(|m| m.to_json(rate)).collect::<Vec<_>>(),
                 "effects": i.effects.iter().map(|e| json!({"effect": e.effect, "enabled": e.enabled, "masks": e.masks.len(), "params": e.params.iter().map(|(k, p)| (k.clone(), json!({"value": format!("{:?}", p.value), "keyframes": p.keyframes.len()}))).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "transitions": t.transitions.iter().map(|x| json!({"id": x.id.0, "effect": x.effect.effect, "start": x.start.0, "duration": x.duration.0, "from": x.from.map(|c| c.0), "to": x.to.map(|c| c.0), "reverse": x.reverse, "align": filmcraft_edit::transitions::bounds(t, x).map(|b| filmcraft_edit::transitions::alignment(x, b.1, rate.frame_duration()).id()), "params": x.effect.params.iter().map(|(k, v)| (k.clone(), serde_json::to_value(&v.value).unwrap_or_default())).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),

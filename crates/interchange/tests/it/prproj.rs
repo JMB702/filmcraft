@@ -621,6 +621,39 @@ fn nested_sequences_that_contain_each_other_are_broken_up() {
 }
 
 #[test]
+fn clip_markers_on_timeline_clips_are_kept_without_repeating_the_master_clips() {
+    let mut d = Doc::default();
+    let vs = d.video_stream(1920, 1080, 60 * SEC);
+    d.media("cam-media", "/Volumes/Shoot/A001.mov", "../Shoot/A001.mov", Some(vs), None);
+    let marker = |name: &str, at: i64| {
+        format!(r#"{{"DVAMarker":{{"mComment":"","mDuration":{{"ticks":0}},"mName":"{name}","mStartTime":{{"ticks":{at}}},"mType":"Comment"}}}}"#)
+    };
+    // the master clip's marker at 3 s; the timeline clip's own clip repeats it and adds one at 4 s
+    let master = d.markers(&[marker("Master", 3 * SEC)]);
+    let own = d.markers(&[marker("Master", 3 * SEC), marker("Clap", 4 * SEC)]);
+    let src = d.media_source(true, "cam-media", 60 * SEC);
+    let mclip = d.clip(true, src, &format!("<MarkerOwner Version=\"1\"><Markers {}/></MarkerOwner>", r(master)), "");
+    d.master("cam-master", "A001.mov", &[mclip]);
+    d.clip_item("cam", "A001.mov", "cam-master", None);
+    let s2 = d.media_source(true, "cam-media", 60 * SEC);
+    let inner = format!("<InPoint>{}</InPoint><MarkerOwner Version=\"1\"><Markers {}/></MarkerOwner>", 2 * SEC, r(own));
+    let ti = d.track_item(true, 0, 5 * SEC, "cam-master", s2, &inner, "", "");
+    let t = d.track(true, &[ti], &[]);
+    let g = d.group(true, &[t]);
+    d.sequence("seq", "Markers", &[g], "", None, &[]);
+    d.sequence_item("seq-item", "Markers", "seq");
+    d.bin("RootProjectItem", "root", "Root", &["cam", "seq-item"]);
+    let (imported, _, report) = import(&d.xml());
+    let (_, seq) = find(&imported.project, "Markers");
+    let clip = clips(seq, true, 0).into_iter().next().unwrap_or_else(|| panic!("the clip is imported: {report}"));
+    assert_eq!(clip.source_in, Tick(2 * SEC));
+    let own: Vec<(&str, Tick)> = clip.markers.iter().map(|m| (m.name.as_str(), m.start)).collect();
+    assert_eq!(own, vec![("Clap", Tick(4 * SEC))], "the clip keeps its own marker, in source time, and not the master clip's");
+    let media = imported.project.item(clip.item).and_then(|i| i.as_media()).unwrap();
+    assert_eq!(media.markers.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["Master"]);
+}
+
+#[test]
 fn deep_bins_and_dangling_references_are_reported_not_fatal() {
     let mut d = Doc::default();
     d.file("clip", "shot.mov", Some((1280, 720)), None, 5);

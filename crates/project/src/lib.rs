@@ -431,6 +431,8 @@ impl Project {
                         if let Some(h) = &mut ti.frame_hold {
                             *h -= delta;
                         }
+                        // the clip's own markers are in media time too
+                        ti.markers.iter_mut().for_each(|mk| mk.start -= delta);
                         for e in &mut ti.effects {
                             for p in e.params.values_mut() {
                                 for k in &mut p.keyframes {
