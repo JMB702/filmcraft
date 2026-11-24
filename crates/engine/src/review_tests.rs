@@ -251,9 +251,12 @@ fn review_config_refuses_hostile_values() {
 #[test]
 fn renditions_keep_the_aspect_and_fit_phones() {
     let r = review::renditions(3840, 2160);
-    assert_eq!(r.iter().map(|r| (r.name.as_str(), r.width, r.height)).collect::<Vec<_>>(), [("small", 960, 540), ("hd", 1920, 1080)]);
+    assert_eq!(r.iter().map(|r| (r.name.as_str(), r.width, r.height)).collect::<Vec<_>>(), [("low", 640, 360), ("small", 960, 540), ("hd", 1920, 1080)]);
     let v = review::renditions(1080, 1920);
-    assert_eq!((v[0].width, v[0].height, v[1].width, v[1].height), (304, 540, 608, 1080));
+    assert_eq!(v.iter().map(|r| (r.width, r.height)).collect::<Vec<_>>(), [(202, 360), (304, 540), (608, 1080)]);
+    // smallest first, each lighter than the next
+    assert!(r.windows(2).all(|p| p[0].bitrate_kbps < p[1].bitrate_kbps));
+    assert_eq!(review::renditions(960, 540).iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["low", "small"]);
     assert_eq!(review::renditions(640, 360).len(), 1);
     assert_eq!(review::renditions(0, 0)[0].width % 2, 0);
 }

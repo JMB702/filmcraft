@@ -41,6 +41,10 @@ struct Els {
     quality: HtmlElement,
     who: Option<HtmlDialogElement>,
     whoname: Option<HtmlInputElement>,
+    stage: HtmlElement,
+    /// The buffered stretch on the scrub bar and the playback notice over the picture (made here).
+    buf: Option<HtmlElement>,
+    note: Option<HtmlElement>,
 }
 
 struct App {
@@ -72,6 +76,30 @@ struct App {
     stale: bool,
     /// `?debug` on the link: a readout of the viewport numbers, for diagnosing a phone's layout.
     diag: Option<Element>,
+    /// The frame last asked for. It stands in for the video's own time while that cannot be
+    /// trusted: before the file's metadata, during a seek, a file switch or a drag on the bar.
+    target: Option<i64>,
+    /// A drag on the scrub bar: the last frame sought, and whether to play on when it ends.
+    scrub_sought: i64,
+    scrub_resume: bool,
+    /// Stall watch and recovery (see `watch_playback`).
+    watch: logic::Watch,
+    retries: u32,
+    retry_at: Option<f64>,
+    /// Buffered seconds when the last stall was judged, to tell "slow" from "nothing arriving".
+    stall_buffered: f64,
+    busy_shown: bool,
+    note_until: f64,
+    note_sticky: bool,
+    last_toggle: f64,
+    /// When the buffered stretch was last drawn.
+    buf_drawn: f64,
+    /// Comments written without a connection, sent when it returns.
+    outbox: Vec<logic::Queued>,
+    outbox_key: String,
+    flush_at: Option<f64>,
+    flush_tries: u32,
+    flushing: bool,
 }
 
 #[wasm_bindgen(start)]
@@ -154,7 +182,21 @@ fn device_info(win: &Window) -> Device {
     let save_data = field("saveData").and_then(|v| v.as_bool()).unwrap_or(false);
     let cellular = field("type").and_then(|v| v.as_string()).is_some_and(|t| t == "cellular");
     let slow = field("effectiveType").and_then(|v| v.as_string()).is_some_and(|t| matches!(t.as_str(), "slow-2g" | "2g" | "3g"));
-    Device { viewport_width: width, save_data, cellular, slow }
+    Device { viewport_width: width, save_data, cellular, slow, measured_kbps: measured_kbps(win) }
+}
+
+/// The speed this page's own script arrived at (its wasm file is the largest thing it loads):
+/// bytes over the time its body took, from the browser's resource timings. `None` from cache.
+fn measured_kbps(win: &Window) -> Option<f64> {
+    let get = |o: &JsValue, k: &str| js_sys::Reflect::get(o, &JsValue::from_str(k)).ok();
+    let perf = get(win, "performance")?;
+    let f = get(&perf, "getEntriesByType")?.dyn_into::<js_sys::Function>().ok()?;
+    let entries = f.call1(&perf, &JsValue::from_str("resource")).ok()?.dyn_into::<js_sys::Array>().ok()?;
+    let num = |o: &JsValue, k: &str| get(o, k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    entries.iter().filter(|e| get(e, "name").and_then(|n| n.as_string()).is_some_and(|n| n.contains(".wasm"))).find_map(|e| {
+        let bytes = num(&e, "transferSize").max(num(&e, "encodedBodySize").min(num(&e, "transferSize") + 1.0));
+        logic::throughput_kbps(bytes, num(&e, "responseEnd") - num(&e, "responseStart"))
+    })
 }
 
 fn listen<E: wasm_bindgen::convert::FromWasmAbi + 'static>(target: &EventTarget, name: &str, f: impl FnMut(E) + 'static) {
@@ -201,11 +243,16 @@ async fn run() -> Result<(), String> {
         quality: by_id(&doc, "quality")?,
         who: by_id(&doc, "who").ok(),
         whoname: by_id(&doc, "whoname").ok(),
+        stage: by_id(&doc, "stage")?,
+        buf: None,
+        note: None,
         doc,
     };
     let token = base.get(3..3 + filmcraft_review::token::TOKEN_HEX).unwrap_or_default();
     let own_key = format!("{}{}", logic::OWN_KEY, token.get(..16).unwrap_or_default());
     let own = load(&win, &own_key).map(|s| logic::parse_own(&s)).unwrap_or_default();
+    let outbox_key = format!("{}{}", logic::OUTBOX_KEY, token.get(..16).unwrap_or_default());
+    let outbox = load(&win, &outbox_key).map(|s| logic::parse_outbox(&s)).unwrap_or_default();
     let choice = load(&win, logic::QUALITY_KEY);
     let current = logic::pick_rendition(&info.renditions, choice.as_deref(), device_info(&win)).ok_or("no file is ready")?;
     let hash = win.location().hash().unwrap_or_default();
@@ -233,9 +280,27 @@ async fn run() -> Result<(), String> {
         editing: None,
         stale: false,
         diag,
+        target: None,
+        scrub_sought: -1,
+        scrub_resume: false,
+        watch: logic::Watch::new(js_sys::Date::now()),
+        retries: 0,
+        retry_at: None,
+        stall_buffered: 0.0,
+        busy_shown: false,
+        note_until: 0.0,
+        note_sticky: false,
+        last_toggle: 0.0,
+        buf_drawn: 0.0,
+        flush_at: (!outbox.is_empty()).then(js_sys::Date::now),
+        outbox,
+        outbox_key,
+        flush_tries: 0,
+        flushing: false,
     }));
     with(&app, |a| {
         a.reveal();
+        a.build_extras();
         a.load_file(false);
         a.render_comments();
         a.setup_name();
@@ -274,8 +339,48 @@ impl App {
         self.els.quality.set_hidden(self.renditions.len() < 2);
     }
 
+    /// The buffered stretch on the scrub bar and the notice over the picture.
+    fn build_extras(&mut self) {
+        let doc = &self.els.doc;
+        if let Ok(b) = doc.create_element("div").and_then(|e| e.dyn_into::<HtmlElement>().map_err(Into::into)) {
+            b.set_class_name("buf");
+            let first = self.els.track.first_child();
+            if self.els.track.insert_before(&b, first.as_ref()).is_ok() {
+                self.els.buf = Some(b);
+            }
+        }
+        if let Ok(n) = doc.create_element("p").and_then(|e| e.dyn_into::<HtmlElement>().map_err(Into::into)) {
+            n.set_class_name("pnote");
+            let _ = n.set_attribute("role", "status");
+            n.set_hidden(true);
+            if self.els.stage.append_child(&n).is_ok() {
+                self.els.note = Some(n);
+            }
+        }
+    }
+
+    /// The video's time, or the time a pending file switch will restore.
+    fn position(&self) -> f64 {
+        self.restore.map_or_else(|| self.els.video.current_time(), |r| r.0)
+    }
+
+    /// Whether the video's own time can be trusted right now.
+    fn settled(&self) -> bool {
+        self.restore.is_none() && !self.scrubbing && self.els.video.ready_state() >= 1 && !self.els.video.seeking()
+    }
+
     fn frame(&self) -> i64 {
-        self.timing.frame_at(self.els.video.current_time())
+        match self.target {
+            Some(t) if !self.settled() => t,
+            _ => self.timing.frame_at(self.position()),
+        }
+    }
+
+    fn playing(&self) -> bool {
+        match self.restore {
+            Some((_, play)) => play,
+            None => !self.els.video.paused() && !self.els.video.ended(),
+        }
     }
 
     /// Point the video at the current rendition, keeping the time (and playing) when switching.
@@ -284,36 +389,254 @@ impl App {
         let src = format!("v/{}.mp4", r.name);
         self.els.quality.set_text_content(Some(logic::quality_label(r)));
         let _ = self.els.quality.set_attribute("aria-label", &format!("Video quality: {} ({}p). Tap to switch.", logic::quality_label(r), r.height));
-        if self.els.video.src().ends_with(&src) || self.els.video.src().contains(&format!("{src}#")) {
-            return;
-        }
+        let now = self.els.video.src();
         if keep {
-            self.restore = Some((self.els.video.current_time(), !self.els.video.paused()));
+            // a second switch before the first has loaded keeps the first one's time
+            self.restore = Some((self.position(), self.playing()));
             self.els.video.set_src(&src);
-        } else {
+            self.els.video.load();
+            self.watch.reset(js_sys::Date::now());
+        } else if !(now.ends_with(&src) || now.contains(&format!("{src}#"))) {
             // `#t=0.001`: Safari shows the first frame instead of black before playback
             self.els.video.set_src(&format!("{src}#t=0.001"));
         }
     }
 
-    /// Jump by `seconds` (the ±10 s buttons, J and L), playing on if it was playing.
-    fn jump(&mut self, seconds: f64) {
-        let f = self.timing.jump(self.frame(), seconds);
-        self.els.video.set_current_time(self.timing.seek_to(f));
+    /// Show `frame`. Before the file's metadata, or during a file switch, the frame is kept and
+    /// shown as soon as the video can seek.
+    fn go(&mut self, frame: i64) {
+        let f = self.timing.clamp(frame);
+        self.target = Some(f);
+        let t = self.timing.seek_to(f);
+        match self.restore.as_mut() {
+            Some(r) => r.0 = t,
+            None if self.els.video.ready_state() >= 1 => self.els.video.set_current_time(t),
+            None => {}
+        }
         self.shown = -1;
         self.draw();
     }
 
+    /// Jump by `seconds` (the ±10 s buttons, J and L), playing on if it was playing.
+    fn jump(&mut self, seconds: f64) {
+        let f = self.timing.jump(self.frame(), seconds);
+        self.go(f);
+    }
+
+    /// Show `frame` and stay on it (frame steps, comment times).
     fn seek(&mut self, frame: i64) {
+        self.pause();
+        self.go(frame);
+    }
+
+    fn pause(&mut self) {
+        if let Some(r) = self.restore.as_mut() {
+            r.1 = false;
+        }
         let _ = self.els.video.pause();
-        self.els.video.set_current_time(self.timing.seek_to(frame));
-        self.shown = -1;
-        self.draw();
+    }
+
+    /// Start playback. A refusal is said over the picture, never swallowed; a broken file is
+    /// loaded again; during a file switch playback starts when the new file can play.
+    fn play(&mut self) {
+        if let Some(r) = self.restore.as_mut() {
+            r.1 = true;
+            return;
+        }
+        if self.els.video.error().is_some() || self.els.video.network_state() == 3 {
+            self.reload(true);
+            return;
+        }
+        // play on the last frame starts over (it would otherwise run for a blink and stop)
+        if self.els.video.ended() || (self.els.video.ready_state() >= 1 && self.frame() >= self.timing.frames - 1) {
+            self.els.video.set_current_time(0.0);
+            self.target = None;
+        }
+        let note = self.els.note.clone();
+        let say = move |msg: &str| {
+            if let Some(n) = &note {
+                n.set_text_content(Some(msg));
+                n.set_hidden(false);
+            }
+        };
+        match self.els.video.play() {
+            Ok(p) => wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = JsFuture::from(p).await {
+                    let name = js_sys::Reflect::get(&e, &JsValue::from_str("name")).ok().and_then(|n| n.as_string()).unwrap_or_default();
+                    match name.as_str() {
+                        // a pause or a new file arrived first: not a failure
+                        "AbortError" => {}
+                        "NotAllowedError" => say("Tap play to start the video."),
+                        _ => say("The video could not start. Tap play to try again."),
+                    }
+                }
+            }),
+            Err(_) => say("The video could not start. Tap play to try again."),
+        }
+        self.note_until = js_sys::Date::now() + 6000.0;
+        self.note_sticky = false;
+    }
+
+    /// Load the current file again at the same place (a network error, a dead connection).
+    fn reload(&mut self, play: bool) {
+        let keep = (self.position(), play || self.playing());
+        let Some(r) = self.renditions.get(self.current) else { return };
+        self.restore = Some(keep);
+        self.els.video.set_src(&format!("v/{}.mp4", r.name));
+        self.els.video.load();
+        self.watch.reset(js_sys::Date::now());
+    }
+
+    /// A notice over the picture. `sticky`: until playback moves again; else for `ms`.
+    fn note(&mut self, msg: &str, ms: f64, sticky: bool) {
+        if let Some(n) = &self.els.note {
+            n.set_text_content(Some(msg));
+            n.set_hidden(false);
+        }
+        self.note_until = js_sys::Date::now() + ms;
+        self.note_sticky = sticky;
+    }
+
+    fn clear_note(&mut self) {
+        if let Some(n) = &self.els.note {
+            n.set_hidden(true);
+        }
+        self.note_sticky = false;
+    }
+
+    fn online(&self) -> bool {
+        self.win.navigator().on_line()
+    }
+
+    fn buffered_total(&self) -> f64 {
+        let b = self.els.video.buffered();
+        (0..b.length()).filter_map(|i| Some(b.end(i).ok()? - b.start(i).ok()?)).filter(|d| d.is_finite() && *d > 0.0).sum()
+    }
+
+    /// Every frame: is the video moving when it should? A spinner after a short wait; after a
+    /// long one (or repeated ones) a lighter file, and on the lightest a fresh request once
+    /// nothing has arrived for a while. Also the retry after a network error.
+    fn watch_playback(&mut self) {
+        let now = js_sys::Date::now();
+        let v = &self.els.video;
+        let broken = v.error().is_some();
+        let active = !broken && ((!v.paused() && !v.ended()) || v.seeking() || self.restore.is_some());
+        let verdict = self.watch.tick(now, active, v.current_time());
+        let busy = verdict != logic::Stall::Fine;
+        if busy != self.busy_shown {
+            self.busy_shown = busy;
+            let _ = self.els.stage.class_list().toggle_with_force("busy", busy);
+        }
+        match verdict {
+            logic::Stall::Stuck => self.stuck(now),
+            logic::Stall::Fine if active && self.restore.is_none() && !v.seeking() && v.ready_state() >= 3 => {
+                // moving again
+                self.retries = 0;
+                self.retry_at = None;
+                if self.note_sticky {
+                    self.clear_note();
+                }
+            }
+            _ => {}
+        }
+        if self.retry_at.is_some_and(|t| now >= t) {
+            self.retry_at = None;
+            if !self.online() {
+                self.note("No connection. The video continues when it's back.", 0.0, true);
+            } else if broken || self.buffered_total() <= self.stall_buffered {
+                // nothing arrived since: ask again
+                self.reload(false);
+                self.retry_at = Some(now + logic::backoff_ms(self.retries.saturating_add(1)));
+                self.retries = self.retries.saturating_add(1);
+            }
+        }
+        if !self.note_sticky && now > self.note_until && self.els.note.as_ref().is_some_and(|n| !n.hidden()) {
+            self.clear_note();
+        }
+        if (now - self.buf_drawn).abs() >= 400.0 {
+            self.buf_drawn = now;
+            self.draw_buffered();
+        }
+    }
+
+    fn stuck(&mut self, now: f64) {
+        self.stall_buffered = self.buffered_total();
+        if !self.online() {
+            self.note("No connection. The video continues when it's back.", 0.0, true);
+            return;
+        }
+        if self.current > 0 {
+            // a lighter file, for this visit only (the reviewer's saved choice stays)
+            self.current -= 1;
+            self.load_file(true);
+            self.note("Slow connection: switched to a lighter video.", 6000.0, false);
+        } else {
+            self.note("Slow connection. Still loading…", 0.0, true);
+            if self.retry_at.is_none() {
+                self.retries = self.retries.saturating_add(1);
+                self.retry_at = Some(now + logic::backoff_ms(self.retries).max(8000.0));
+            }
+        }
+    }
+
+    /// The video element gave up on its file (the connection dropped mid-load, a bad range).
+    fn on_error(&mut self) {
+        let now = js_sys::Date::now();
+        self.retries = self.retries.saturating_add(1);
+        self.stall_buffered = f64::MAX;
+        if !self.online() {
+            self.note("No connection. The video continues when it's back.", 0.0, true);
+            self.retry_at = None;
+            return;
+        }
+        // the same file twice, then a lighter one if there is one
+        if self.retries > 2 && self.current > 0 {
+            self.current -= 1;
+            self.retries = 1;
+        }
+        self.note("Connection problem. Trying again…", 0.0, true);
+        self.retry_at = Some(now + logic::backoff_ms(self.retries));
+    }
+
+    /// Back online, or back from the background: pick up where things stopped.
+    fn wake(&mut self) {
+        self.watch.reset(js_sys::Date::now());
+        self.playing_shown = None;
+        if self.els.video.error().is_some() || self.retry_at.is_some() {
+            self.retry_at = Some(0.0);
+        }
+        if !self.outbox.is_empty() {
+            self.flush_at = Some(0.0);
+        }
+    }
+
+    fn draw_buffered(&self) {
+        let Some(buf) = &self.els.buf else { return };
+        let v = &self.els.video;
+        let b = v.buffered();
+        let ranges: Vec<(f64, f64)> = (0..b.length().min(64)).filter_map(|i| Some((b.start(i).ok()?, b.end(i).ok()?))).collect();
+        let (left, width) = logic::buffered_span(&ranges, v.current_time(), v.duration()).unwrap_or((0.0, 0.0));
+        let _ = buf.style().set_property("left", &format!("{left:.2}%"));
+        let _ = buf.style().set_property("width", &format!("{width:.2}%"));
     }
 
     /// Timecode, playhead and the composer's time, when the frame changed.
     fn draw(&mut self) {
         self.sync_transport();
+        if self.target.is_some() && self.settled() {
+            self.target = None;
+        }
+        // a drag sends one seek at a time (a weak connection cannot keep up with every move)
+        if self.scrubbing
+            && let Some(f) = self.target
+            && f != self.scrub_sought
+            && self.restore.is_none()
+            && self.els.video.ready_state() >= 1
+            && !self.els.video.seeking()
+        {
+            self.scrub_sought = f;
+            self.els.video.set_current_time(self.timing.seek_to(f));
+        }
         let f = self.frame();
         if f == self.shown {
             return;
@@ -415,13 +738,21 @@ impl App {
         }
     }
 
-    fn toggle_play(&self) {
-        let v = &self.els.video;
-        if v.paused() || v.ended() {
-            let _ = v.play();
-        } else {
-            let _ = v.pause();
+    /// Play or pause. A second tap within a quarter second is the same tap (a double tap would
+    /// otherwise start and stop at once).
+    fn toggle_play(&mut self) {
+        let now = js_sys::Date::now();
+        if (now - self.last_toggle).abs() < 250.0 {
+            return;
         }
+        self.last_toggle = now;
+        if self.playing() {
+            self.pause();
+        } else {
+            self.play();
+        }
+        self.playing_shown = None;
+        self.sync_transport();
     }
 
     /// Keep the transport true to the video every frame, not only on its events (WebKit can
@@ -429,7 +760,7 @@ impl App {
     /// the play button shows what the video is doing, and the browser's controls stay off the
     /// picture unless the video is full screen.
     fn sync_transport(&mut self) {
-        let playing = !self.els.video.paused();
+        let playing = self.playing();
         if self.playing_shown != Some(playing) {
             self.playing_shown = Some(playing);
             let _ = self.els.play.class_list().toggle_with_force("playing", playing);
@@ -444,8 +775,13 @@ impl App {
     /// controls. Elsewhere: the standard call on the video, whose controls `fullscreenchange`
     /// turns on while it is full screen. The page never turns the controls on by itself, so a
     /// refused or unanswered request cannot leave them over the picture.
-    fn fullscreen(&self) {
+    fn fullscreen(&mut self) {
         let video = self.els.video.clone();
+        // iPhone's player refuses (throws) before it knows the file
+        if video.ready_state() < 1 {
+            self.note("The video is still loading. Try full screen in a moment.", 4000.0, false);
+            return;
+        }
         if call_method(&video, "webkitEnterFullscreen").is_some() {
             return;
         }
@@ -495,8 +831,25 @@ impl App {
                 }
             }
         }
+        // comments still waiting for a connection, after the posted ones
+        for (n, q) in self.outbox.iter().enumerate() {
+            let c = Comment { id: format!("queued{n}"), author: q.name.clone(), text: q.text.clone(), frame: q.frame, at_unix: 0, edited: false };
+            if let Ok(li) = comment_item(doc, &self.timing, &c, false) {
+                let _ = li.class_list().add_1("queued");
+                if let Ok(w) = doc.create_element("p") {
+                    w.set_class_name("sub");
+                    w.set_text_content(Some("Waiting for a connection. It sends by itself."));
+                    let _ = li.append_child(&w);
+                }
+                let _ = self.els.list.append_child(&li);
+            }
+        }
         self.els.count.set_text_content(Some(&logic::count_label(self.comments.len())));
-        self.els.empty.set_hidden(!self.comments.is_empty());
+        self.els.empty.set_hidden(!self.comments.is_empty() || !self.outbox.is_empty());
+    }
+
+    fn save_outbox(&self) {
+        save(&self.win, &self.outbox_key, &logic::store_outbox(&self.outbox));
     }
 
     fn highlight(&self, id: &str) {
@@ -713,8 +1066,11 @@ fn wire_video(app: &Shared) {
             if let Some((t, play)) = a.restore.take() {
                 a.els.video.set_current_time(t);
                 if play {
-                    let _ = a.els.video.play();
+                    a.play();
                 }
+            } else if let Some(f) = a.target {
+                // asked for before the video could seek
+                a.els.video.set_current_time(a.timing.seek_to(f));
             } else if let Some(id) = a.focus.take()
                 && let Some(f) = a.comments.iter().find(|c| c.id == id).map(|c| c.frame)
             {
@@ -734,10 +1090,34 @@ fn wire_video(app: &Shared) {
     });
     // the transport follows the video on its events too (`animate` also checks every frame,
     // which catches an event skipped while a handler held the app)
-    for name in ["play", "playing", "pause", "ended"] {
+    for name in ["play", "playing", "pause", "ended", "waiting", "canplay", "webkitbeginfullscreen", "webkitendfullscreen"] {
         let a2 = app.clone();
         listen(&video, name, move |_: Event| {
             with(&a2, |a| a.sync_transport());
+        });
+    }
+    let a2 = app.clone();
+    listen(&video, "error", move |_: Event| {
+        with(&a2, |a| a.on_error());
+    });
+    // back online, or back from the background or a locked phone
+    let Some(win) = with(app, |a| a.win.clone()) else { return };
+    let a2 = app.clone();
+    listen(&win, "online", move |_: Event| {
+        with(&a2, |a| a.wake());
+    });
+    let a2 = app.clone();
+    listen(&win, "pageshow", move |_: Event| {
+        with(&a2, |a| a.wake());
+    });
+    if let Some(doc) = with(app, |a| a.els.doc.clone()) {
+        let a2 = app.clone();
+        listen(&doc, "visibilitychange", move |_: Event| {
+            with(&a2, |a| {
+                if !a.els.doc.hidden() {
+                    a.wake();
+                }
+            });
         });
     }
     // tapping the picture plays and pauses (there are no controls over it)
@@ -808,6 +1188,9 @@ fn wire_steps(app: &Shared) {
                 if let Some(r) = a.renditions.get(a.current) {
                     save(&a.win, logic::QUALITY_KEY, &r.name);
                 }
+                a.retries = 0;
+                a.retry_at = None;
+                a.clear_note();
                 a.load_file(true);
             }
         });
@@ -849,16 +1232,23 @@ fn wire_steps(app: &Shared) {
 
 fn wire_scrub(app: &Shared) {
     let Some(track) = with(app, |a| a.els.track.clone()) else { return };
+    // the playhead follows the finger at once; `draw` sends the seeks one at a time
     let at_pointer = |a: &mut App, e: &PointerEvent| {
         let r = a.els.track.get_bounding_client_rect();
         let f = a.timing.frame_at_x(f64::from(e.client_x()) - r.left(), r.width());
-        a.seek(f);
+        a.target = Some(f);
+        a.shown = -1;
+        a.draw();
     };
     let a2 = app.clone();
     listen(&track, "pointerdown", move |e: PointerEvent| {
         e.prevent_default();
         with(&a2, |a| {
+            a.scrub_resume = a.playing();
+            a.pause();
             a.scrubbing = true;
+            a.scrub_sought = -1;
+            let _ = a.els.track.class_list().add_1("drag");
             let _ = a.els.track.set_pointer_capture(e.pointer_id());
             at_pointer(a, &e);
         });
@@ -871,10 +1261,24 @@ fn wire_scrub(app: &Shared) {
             }
         });
     });
-    for name in ["pointerup", "pointercancel"] {
+    for name in ["pointerup", "pointercancel", "lostpointercapture"] {
         let a2 = app.clone();
         listen(&track, name, move |_: PointerEvent| {
-            with(&a2, |a| a.scrubbing = false);
+            with(&a2, |a| {
+                if !a.scrubbing {
+                    return;
+                }
+                a.scrubbing = false;
+                let _ = a.els.track.class_list().remove_1("drag");
+                // land exactly where the finger left, then carry on playing if it was
+                if let Some(f) = a.target {
+                    a.go(f);
+                }
+                if a.scrub_resume {
+                    a.scrub_resume = false;
+                    a.play();
+                }
+            });
         });
     }
 }
@@ -994,9 +1398,7 @@ fn wire_composer(app: &Shared) {
     // typing pauses the video, so the comment's frame is the one on screen
     let a2 = app.clone();
     listen(&text, "focus", move |_: Event| {
-        with(&a2, |a| {
-            let _ = a.els.video.pause();
-        });
+        with(&a2, |a| a.pause());
     });
     let a2 = app.clone();
     listen(&text, "input", move |_: Event| {
@@ -1076,9 +1478,88 @@ fn post_comment(app: &Shared) {
                     let _ = a.els.text.blur();
                     a.set_status(&msg, false);
                 }
+                // no connection: keep the comment and send it when the connection is back
+                (0, _) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body)
+                        && let (Some(text), Some(frame)) = (v.get("text").and_then(|t| t.as_str()), v.get("frame").and_then(serde_json::Value::as_i64))
+                        && a.outbox.len() < logic::MAX_QUEUED
+                    {
+                        a.outbox.push(logic::Queued { name: name.clone(), text: text.to_string(), frame });
+                        a.save_outbox();
+                        a.remember_name(&name);
+                        a.els.text.set_value("");
+                        a.grow_text();
+                        let _ = a.els.text.blur();
+                        a.render_comments();
+                        a.flush_tries = 1;
+                        a.flush_at = Some(js_sys::Date::now() + logic::backoff_ms(1));
+                        a.set_status("No connection. Your comment is saved here and sends by itself when you're back online.", true);
+                    } else {
+                        a.set_status(&logic::error_text(status, &text), true);
+                    }
+                }
                 _ => a.set_status(&logic::error_text(status, &text), true),
             }
         });
+    });
+}
+
+/// Send the waiting comments, oldest first. Stops at the first that cannot be sent yet.
+fn flush_outbox(app: &Shared) {
+    let Some(Some((win, base, q, body))) = with(app, |a| {
+        if a.flushing || a.posting {
+            return None;
+        }
+        let q = a.outbox.first()?.clone();
+        a.flushing = true;
+        a.flush_at = None;
+        let body = serde_json::json!({ "name": q.name, "text": q.text, "frame": q.frame, "device": a.device });
+        Some((a.win.clone(), a.base.clone(), q, body.to_string()))
+    }) else {
+        return;
+    };
+    let app = app.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        let (status, text) = fetch(&win, &format!("{base}comments"), "POST", Some(&body)).await;
+        let more = with(&app, |a| {
+            a.flushing = false;
+            let now = js_sys::Date::now();
+            match (status, serde_json::from_str::<Comment>(&text)) {
+                (201, Ok(c)) => {
+                    a.outbox.retain(|x| *x != q);
+                    a.save_outbox();
+                    a.remember_own(&c.id);
+                    logic::add_posted(&mut a.comments, c);
+                    a.render_comments();
+                    a.flush_tries = 0;
+                    if a.outbox.is_empty() {
+                        a.set_status("Back online: your waiting comments are posted.", false);
+                    }
+                    !a.outbox.is_empty()
+                }
+                // still no connection, or the server asks to slow down: later
+                (0 | 429 | 500..=599, _) => {
+                    a.flush_tries = a.flush_tries.saturating_add(1);
+                    a.flush_at = Some(now + logic::backoff_ms(a.flush_tries));
+                    false
+                }
+                // refused for good (the link was retired, the comment limit): hand the text back
+                _ => {
+                    a.outbox.retain(|x| *x != q);
+                    a.save_outbox();
+                    if a.els.text.value().is_empty() {
+                        a.els.text.set_value(&q.text);
+                        a.grow_text();
+                    }
+                    a.render_comments();
+                    a.set_status(&logic::error_text(status, &text), true);
+                    !a.outbox.is_empty()
+                }
+            }
+        });
+        if more == Some(true) {
+            flush_outbox(&app);
+        }
     });
 }
 
@@ -1124,17 +1605,31 @@ fn wire_live(app: &Shared, base: &str) {
     std::mem::forget(es);
 }
 
-/// Redraw the timecode and playhead every animation frame while anything changes.
+/// One round of upkeep: the timecode and playhead, the stall watch, the layout check, and any
+/// waiting comments that are due.
+fn upkeep(app: &Shared) -> Option<Window> {
+    let (win, due) = with(app, |a| {
+        a.draw();
+        a.watch_playback();
+        a.check_layout();
+        let due = a.flush_at.is_some_and(|t| js_sys::Date::now() >= t) && !a.outbox.is_empty();
+        (a.win.clone(), due)
+    })?;
+    if due {
+        flush_outbox(app);
+    }
+    Some(win)
+}
+
+/// Upkeep every animation frame, and twice a second on a timer as well: frames stop while the
+/// page is not being drawn (a background tab still playing sound), and recovery from a dead
+/// connection must not wait for them.
 fn animate(app: Shared) {
     let cb: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let again = cb.clone();
+    let a2 = app.clone();
     let tick = Closure::<dyn FnMut()>::new(move || {
-        let win = with(&app, |a| {
-            a.draw();
-            a.check_layout();
-            a.win.clone()
-        });
-        if let (Some(win), Ok(c)) = (win, again.try_borrow())
+        if let (Some(win), Ok(c)) = (upkeep(&a2), again.try_borrow())
             && let Some(c) = c.as_ref()
         {
             let _ = win.request_animation_frame(c.as_ref().unchecked_ref());
@@ -1142,6 +1637,12 @@ fn animate(app: Shared) {
     });
     if let Some(win) = web_sys::window() {
         let _ = win.request_animation_frame(tick.as_ref().unchecked_ref());
+        let timer = Closure::<dyn FnMut()>::new(move || {
+            let _ = upkeep(&app);
+        });
+        let _ = win.set_interval_with_callback_and_timeout_and_arguments_0(timer.as_ref().unchecked_ref(), 500);
+        // runs for the page's lifetime
+        timer.forget();
     }
     if let Ok(mut slot) = cb.try_borrow_mut() {
         *slot = Some(tick);

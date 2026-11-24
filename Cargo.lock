@@ -2438,6 +2438,7 @@ dependencies = [
  "filmcraft-review",
  "filmcraft-time",
  "js-sys",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

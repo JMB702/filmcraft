@@ -50,41 +50,29 @@ button { font: inherit; color: inherit; }
   html:not(.wasm) .top { display: none; }
 }
 
-.tools {
-  display: grid; grid-template-columns: 54px 44px minmax(0, 1fr) 44px 54px; align-items: center; gap: 4px;
-  padding: 8px calc(12px + env(safe-area-inset-right)) 4px calc(12px + env(safe-area-inset-left));
-}
-.step {
-  min-height: 44px; padding: 0 2px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel);
-  font-size: 15px; font-weight: 600; white-space: nowrap; touch-action: manipulation;
-}
-.step:active { background: var(--line); }
-.tc { text-align: center; white-space: nowrap; font: 600 clamp(14px, 4.6vw, 20px)/1 ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
-
-/* Narrow phones (320 px): the five transport buttons and the timecode still fit on one row. */
-@media (max-width: 360px) {
-  .tools { grid-template-columns: 48px 40px minmax(0, 1fr) 40px 48px; padding-left: calc(8px + env(safe-area-inset-left)); padding-right: calc(8px + env(safe-area-inset-right)); }
-  .step { font-size: 13px; }
-  .tc { font-size: 15px; }
-}
-
-/* Transport under the picture: play, the scrub bar with a tick per comment, full screen. The hit
-   areas are 44 px; the track is drawn thin. */
+/* Transport under the picture. First the scrub bar (a tick per comment, the buffered stretch
+   lighter) with full screen beside it and the timecode under it; then the play row. The bar's hit
+   area is 48 px tall; it is drawn thin. */
 .scrub {
-  display: flex; align-items: center; gap: 4px;
-  padding: 2px calc(6px + env(safe-area-inset-right)) 0 calc(6px + env(safe-area-inset-left));
+  display: flex; flex-wrap: wrap; align-items: center; column-gap: 4px;
+  padding: 2px calc(8px + env(safe-area-inset-right)) 0 calc(8px + env(safe-area-inset-left));
 }
-.track { flex: 1; min-width: 0; margin: 0 8px; position: relative; height: 44px; cursor: pointer; touch-action: none; }
+.scrub .tc { order: 3; flex: 0 0 100%; }
+.track { flex: 1; min-width: 0; margin: 0 6px 0 10px; position: relative; height: 48px; cursor: pointer; touch-action: none; }
 .ic {
-  flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 22px; background: none;
+  flex: none; width: 48px; height: 48px; padding: 0; border: 0; border-radius: 24px; background: none;
   display: grid; place-items: center; touch-action: manipulation; cursor: pointer;
 }
+.tools .pp { width: 76px; height: 60px; border-radius: 18px; background: var(--accent); color: #fff; }
+@media (min-width: 400px) { .tools .pp { width: 84px; height: 64px; } }
+@media (max-width: 360px) { .tools .pp { width: 66px; } }
 .ic:active { background: var(--line); }
+.tools .pp:active { background: #3d74dc; }
 .ic::before { content: ""; display: block; }
 /* Icons drawn in CSS (no icon files): play is a triangle, pause two bars, full screen four corners. */
-.pp::before { width: 16px; height: 18px; margin-left: 3px; background: currentColor; clip-path: polygon(0 0, 100% 50%, 0 100%); }
+.pp::before { width: 20px; height: 24px; margin-left: 4px; background: currentColor; clip-path: polygon(0 0, 100% 50%, 0 100%); }
 .pp.playing::before {
-  width: 14px; height: 16px; margin-left: 0; clip-path: none;
+  width: 18px; height: 22px; margin-left: 0; clip-path: none;
   background: linear-gradient(90deg, currentColor 0 35%, transparent 35% 65%, currentColor 65% 100%);
 }
 .fs::before {
@@ -94,12 +82,36 @@ button { font: inherit; color: inherit; }
   background-size: 6px 2px, 2px 6px, 6px 2px, 2px 6px, 6px 2px, 2px 6px, 6px 2px, 2px 6px;
   background-position: 0 0, 0 0, 100% 0, 100% 0, 0 100%, 0 100%, 100% 100%, 100% 100%;
 }
-.track::before { content: ""; position: absolute; left: 0; right: 0; top: 20px; height: 4px; border-radius: 2px; background: var(--line); }
-.fill { position: absolute; left: 0; top: 20px; height: 4px; width: 0; border-radius: 2px; background: var(--accent); }
-.head { position: absolute; top: 13px; width: 18px; height: 18px; margin-left: -9px; left: 0; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px #0008; pointer-events: none; }
+.track::before { content: ""; position: absolute; left: 0; right: 0; top: 21px; height: 6px; border-radius: 2px; background: var(--line); }
+.buf { position: absolute; left: 0; top: 21px; height: 6px; width: 0; border-radius: 3px; background: #ffffff47; }
+.fill { position: absolute; left: 0; top: 21px; height: 6px; width: 0; border-radius: 3px; background: var(--accent); }
+.head { position: absolute; top: 13px; width: 22px; height: 22px; margin-left: -11px; left: 0; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px #0008; pointer-events: none; transition: transform .1s; }
+.track.drag .head { transform: scale(1.35); }
 .ticks { position: absolute; inset: 0; pointer-events: none; }
-.tick { position: absolute; top: 6px; width: 3px; height: 12px; margin-left: -1.5px; border-radius: 2px; background: var(--mark); }
+.tick { position: absolute; top: 5px; width: 3px; height: 12px; margin-left: -1.5px; border-radius: 2px; background: var(--mark); }
 .tick.mine { background: #f2c94c; }
+
+/* The play row, thumb-sized: play in the middle and the largest, a frame step each side of it, the
+   ten-second jumps at the ends. 56 px targets with 12 px between them, so a jump is not hit when
+   aiming for a frame step. */
+.tools {
+  display: flex; justify-content: center; align-items: center; gap: 12px;
+  padding: 6px calc(8px + env(safe-area-inset-right)) 8px calc(8px + env(safe-area-inset-left));
+}
+.step {
+  flex: 0 0 56px; height: 56px; padding: 0; border-radius: 14px; border: 1px solid var(--line); background: var(--panel);
+  font-size: 15px; font-weight: 600; white-space: nowrap; touch-action: manipulation;
+}
+.step:active { background: var(--line); }
+.tc { text-align: center; white-space: nowrap; font: 600 15px/20px ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+@media (min-width: 400px) {
+  .step { flex-basis: 60px; height: 60px; }
+}
+/* Narrow phones (320 px): the five buttons still fit on one row. */
+@media (max-width: 360px) {
+  .tools { gap: 9px; }
+  .step { flex-basis: 50px; font-size: 14px; }
+}
 
 .feed { padding: 4px calc(16px + env(safe-area-inset-right)) 16px calc(16px + env(safe-area-inset-left)); }
 .list { list-style: none; margin: 0; padding: 0; }
@@ -161,7 +173,7 @@ html.wasm .namerow.known { display: none; }
 .wait { padding: 48px 16px; text-align: center; }
 .spinner { width: 36px; height: 36px; margin: 0 auto 12px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .spinner, .stage.busy::after { animation: none; } }
 
 /* Wider screens without the script: the same column, centred. */
 @media (min-width: 900px) {
@@ -180,7 +192,17 @@ html.wasm body {
   display: flex; flex-direction: column;
 }
 html.wasm :is(.top, .stage, .scrub, .tools, .composer) { flex: none; }
-html.wasm .stage { position: static; }
+html.wasm .stage { position: relative; }
+/* Waiting for the connection: a spinner over the picture, and what the page is doing about it. */
+.stage.busy::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%;
+  border: 4px solid #ffffff55; border-top-color: #fff; animation: spin 1s linear infinite; pointer-events: none;
+}
+.pnote {
+  position: absolute; left: 8px; right: 8px; bottom: 8px; margin: 0; padding: 8px 12px; border-radius: 10px;
+  background: rgba(0, 0, 0, .74); color: #fff; font-size: 14px; text-align: center; pointer-events: none;
+}
+.c.queued { opacity: .7; }
 html.wasm .stage video { cursor: pointer; max-height: min(62dvh, calc(var(--vvh, 100dvh) - 340px)); }
 html.wasm .feed { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 html.wasm .c { scroll-margin-top: 8px; }
@@ -196,11 +218,10 @@ html.wasm .at-chip { display: none; }
    what doesn't fit. A comment's editor sits in the list with its buttons above the box. */
 html.wasm.typing { height: auto; overflow: visible; }
 html.wasm.typing body { position: static; top: auto; height: var(--resth, 100lvh); }
-html.wasm.typing :is(.top, .scrub) { display: none; }
+html.wasm.typing :is(.top, .tools, .track, .fs) { display: none; }
 html.wasm.typing .stage video { max-height: calc(var(--resth, 100lvh) * .3); }
-html.wasm.typing .tools { display: flex; justify-content: center; padding-top: 4px; padding-bottom: 2px; }
-html.wasm.typing .tools .step { display: none; }
-html.wasm.typing .tools .tc { font-size: 15px; color: var(--dim); }
+html.wasm.typing .scrub { padding-top: 4px; padding-bottom: 2px; }
+html.wasm.typing .scrub .tc { color: var(--dim); }
 html.wasm.typing.compose .feed { order: -1; }
 html.wasm.typing .composer { padding-bottom: 8px; }
 
@@ -224,7 +245,13 @@ html.wasm.side .top { grid-area: top; border-bottom: 1px solid var(--line); }
 html.wasm.side .stage { grid-area: stage; min-height: 0; }
 html.wasm.side .stage video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
 html.wasm.side .scrub { grid-area: scrub; }
-html.wasm.side .tools { grid-area: tools; align-self: center; padding-bottom: calc(4px + env(safe-area-inset-bottom)); }
+html.wasm.side .tools { grid-area: tools; align-self: center; padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
+/* a phone on its side has little height: the timecode goes beside the bar and the row is lower */
+html.wasm.low .scrub { flex-wrap: nowrap; }
+html.wasm.low .scrub .tc { order: 0; flex: none; margin-right: 4px; }
+html.wasm.low .tools { padding-top: 0; padding-bottom: calc(4px + env(safe-area-inset-bottom)); }
+html.wasm.low .step { height: 48px; }
+html.wasm.low .tools .pp { height: 50px; }
 html.wasm.side .feed { grid-area: feed; border-left: 1px solid var(--line); }
 html.wasm.side .composer { grid-area: composer; border-left: 1px solid var(--line); }
 /* the timecode is right beside it, under the picture; the comment box gets the room */

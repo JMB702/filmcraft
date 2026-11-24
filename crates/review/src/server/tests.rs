@@ -146,6 +146,8 @@ fn video_is_served_in_ranges() {
     assert_eq!((full.status, full.body.as_slice()), (200, MEDIA));
     assert_eq!(full.header("accept-ranges").as_deref(), Some("bytes"));
     assert_eq!(full.header("content-type").as_deref(), Some("video/mp4"));
+    // a rendered file never changes: the browser keeps what it has and asks only for what it lacks
+    assert!(full.header("cache-control").is_some_and(|c| c.contains("immutable")));
     let part = req(r.addr, "GET", &v, &[("Range", "bytes=0-1")], b"");
     assert_eq!((part.status, part.body.as_slice()), (206, &MEDIA[..2]));
     assert_eq!(part.header("content-range"), Some(format!("bytes 0-1/{}", MEDIA.len())));
@@ -278,6 +280,25 @@ fn only_the_writing_device_edits_or_deletes() {
     // a typed timecode outside the video is refused
     let bad = req(r.addr, "POST", &base, &[("Content-Type", "application/x-www-form-urlencoded")], b"name=Bo&tc=02%3A00%3A00%3A00&text=x");
     assert_eq!(bad.status, 400);
+}
+
+#[test]
+fn a_comment_sent_twice_is_saved_once() {
+    // a phone on a bad connection posts, loses the answer and posts the same comment again
+    let r = start();
+    let base = format!("/r/{}/comments", r.share.token);
+    let body = json!({"name": "Jeff", "text": "Trim this", "frame": 12, "device": DEVICE});
+    let first = post_json(r.addr, &base, body.clone());
+    let again = post_json(r.addr, &base, body.clone());
+    assert_eq!((first.status, again.status), (201, 201));
+    assert_eq!(first.json()["id"], again.json()["id"]);
+    assert_eq!(r.dir.read_events(&r.share.id).unwrap().len(), 1);
+    // another device saying the same is a new comment (the posts here stay under the rate limit)
+    assert_ne!(post_json(r.addr, &base, json!({"name": "Jeff", "text": "Trim this", "frame": 12, "device": OTHER})).json()["id"], first.json()["id"]);
+    // once deleted, the same words post again
+    let one = format!("{base}/{}", first.json()["id"].as_str().unwrap());
+    assert_eq!(post_json(r.addr, &one, json!({"action": "delete", "device": DEVICE})).status, 200);
+    assert_ne!(post_json(r.addr, &base, body).json()["id"], first.json()["id"]);
 }
 
 #[test]

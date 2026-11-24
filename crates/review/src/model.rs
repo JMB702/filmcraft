@@ -9,7 +9,7 @@ pub const SHARE_FORMAT: u32 = 1;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rendition {
-    /// `small` (cellular) or `hd`. Also the file name: `media/<name>.mp4`.
+    /// `low` (weak signal), `small` (phones) or `hd`. Also the file name: `media/<name>.mp4`.
     pub name: String,
     pub width: u32,
     pub height: u32,
@@ -17,7 +17,7 @@ pub struct Rendition {
 }
 
 /// Rendition names the server will serve (anything else in a path is a 404).
-pub const RENDITIONS: [&str; 2] = ["small", "hd"];
+pub const RENDITIONS: [&str; 3] = ["low", "small", "hd"];
 
 /// A review link (`shares/<id>/share.json`). Written by the app; the server only reads it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

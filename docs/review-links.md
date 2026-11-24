@@ -8,7 +8,7 @@ the video and the comments stay on this machine.
 ## How it works
 
 ```
-FilmCraft app ── review.share ──► renders small.mp4 + hd.mp4, writes share.json
+FilmCraft app ── review.share ──► renders low/small/hd.mp4, writes share.json
      ▲                                     │
      │ review.sync (markers, one           ▼
      │ undo step per comment)     review server (filmcraft --review-server <data>/Review)
@@ -43,7 +43,7 @@ Under `<data dir>/Review/` (folders 0700, files 0600):
 | `shares/<id>/share.json` | the share: token, project path, sequence id, frame rate, start timecode, range, expiry, revoked |
 | `shares/<id>/events.jsonl` | the comment log (append-only, fsync before the reply) |
 | `shares/<id>/applied.json` | ids of the events this machine's app has applied |
-| `shares/<id>/small.mp4`, `hd.mp4` | the renders (`*.partial.mp4` while encoding) |
+| `shares/<id>/low.mp4`, `small.mp4`, `hd.mp4` | the renders (`*.partial.mp4` while encoding) |
 
 ## Commands
 
@@ -60,11 +60,29 @@ The project must be saved first (comments are matched to it by path).
 
 ## Delivery
 
-Two progressive H.264/AAC MP4 files with the movie header first (faststart), served with HTTP
-Range: **small** (fits 960×540, about 1.4 Mb/s, for phones and cellular) and **hd** (fits
-1920×1080, about 6 Mb/s). The page picks small on phone-width screens, Save-Data, cellular or slow
-links, and the largest file otherwise; the quality chip switches and is remembered. HLS is not
-used: it needs a script player on every browser but Safari.
+Three progressive H.264/AAC MP4 files with the movie header first (faststart), served with HTTP
+Range and cached as immutable (a new version is a new link), rendered smallest first so the link
+plays as soon as the lightest is done: **low** (fits 640×360, about 0.5 Mb/s, for a weak phone
+signal), **small** (fits 960×540, about 1.4 Mb/s, for phones) and **hd** (fits 1920×1080, about
+6 Mb/s). Links made before `low` existed have only small and hd, and work as before.
+
+The page starts with the file the screen and the connection can carry:
+- the reviewer's own choice from the quality chip, when they have made one;
+- the lightest on Save-Data or a link the browser calls slow;
+- with a measured speed (how fast the page's own script arrived), the largest file that fits with
+  headroom, phones stopping at 540p;
+- otherwise 540p on phones and cellular and the largest elsewhere.
+
+While playing it watches whether the picture moves. Frozen time adds up (one long freeze, or the
+many short ones of a file the link cannot quite carry): a spinner after 0.7 s, and after about
+5 s a lighter file at the same frame, for this visit only. On the lightest file it keeps loading,
+says so over the picture, and asks again once nothing has arrived for a while; a network error is
+retried with back-off (2 s doubling to 30 s), then on a lighter file. Coming back online or back
+to the tab retries at once. A comment posted with no connection is kept on the device, shown as
+waiting, and sent when the connection returns; the server answers a repeat of the same comment
+from the same device with the one it already saved. HLS is not used: it needs a script player on
+every browser but Safari. Its cost: a long video's index (about 370 KB for 20 minutes) must
+arrive before the first frame.
 
 ## Exact frames
 
@@ -115,10 +133,15 @@ the commands still to run, in order. A typical first run:
 
 The server renders a page that works with no script: the browser's own player, the comment list,
 and a form with a typed timecode. The scripted page (`apps/filmcraft-review-web`, Rust compiled to
-wasm with `wasm-bindgen` and `web-sys`) adds its own transport under the video (play and pause,
-full screen, the sequence timecode, one-frame steps, ten-second jumps, the scrub bar with a tick per
-comment; keys: Space or K play, J and L jump ten seconds, arrows step frames), so
-nothing covers the picture; tap-to-seek, live comments (server-sent events), the name asked once per
+wasm with `wasm-bindgen` and `web-sys`) adds its own transport under the video, so nothing covers
+the picture: the scrub bar (a tick per comment, the buffered stretch drawn lighter) with full
+screen beside it and the sequence timecode under it, then a thumb-sized play row (play in the
+middle, a one-frame step each side, the ten-second jumps at the ends; 56 px targets 12 px apart).
+Keys: Space or K play, J and L jump ten seconds, arrows step frames. The controls take their state
+from the video, not from the tap: a step or jump made before the video has loaded, during a seek
+or during a file switch is kept and applied; dragging the bar moves the playhead at once, seeks
+one request at a time and plays on afterwards if it was playing; play on the last frame starts
+over; a refused play is said over the picture. Also tap-to-seek, live comments (server-sent events), the name asked once per
 device, and editing and deleting your own comments. The scripted page fits the visible screen: the
 video stays at the top and only the comment list scrolls. Typing on a touch screen switches the
 page to normal flow, as tall as the screen was before the keyboard, ending with the picture, a
