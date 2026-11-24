@@ -211,3 +211,52 @@ fn close_gap_can_be_found_assigned_and_run_from_the_shortcut_editor() {
     d.ok("engine.execute", json!({"command":"edit.undo","params":{}}));
     assert_eq!(serde_json::to_value(&d.harness.state().session.project).unwrap(), before);
 }
+
+#[test]
+fn escape_clears_a_selected_gap() {
+    let (mut d, a, b) = Driver::two_clips();
+    let f96 = d.frame(96);
+    d.click_between(a, b, "left");
+    assert!(d.gap().is_object());
+    d.ok("ui.key", json!({"key": "Escape"}));
+    d.frames(3);
+    assert_eq!(d.gap(), Value::Null, "Esc drops the gap");
+    assert!(d.rect("timeline.gap").is_none(), "and its highlight");
+    d.ok("ui.key", json!({"key": "Delete"}));
+    d.frames(3);
+    assert_eq!(d.start(b), f96, "Delete then moves nothing");
+}
+
+/// The pictures' linked sounds sit on A1 with its sync lock off, so closing the gap would leave
+/// them behind: Delete refuses, nothing moves, and the status bar says why, naming A1.
+#[test]
+fn a_gap_that_would_break_sync_is_refused_with_the_reason_in_the_status_bar() {
+    let (mut d, a, b) = Driver::two_clips();
+    let f96 = d.frame(96);
+    d.ok("engine.execute", json!({"command": "timeline.setTrack", "params": {"track": "A1", "syncLock": false}}));
+    d.click_between(a, b, "left");
+    assert!(d.gap().is_object(), "the gap can still be selected");
+    let undo = d.harness.state().session.history.undo.len();
+    d.ok("ui.key", json!({"key": "Delete"}));
+    d.frames(3);
+    assert_eq!(d.start(b), f96, "nothing moved");
+    assert_eq!(d.harness.state().session.history.undo.len(), undo, "no edit");
+    let status = d.harness.state().ui.status.clone();
+    assert!(status.contains("A1") && status.contains("sync"), "the status bar says why: {status:?}");
+}
+
+/// The whole flow over the control channel's engine commands, as an agent drives it:
+/// `timeline.selectGap`, then Edit ▸ Ripple Delete from the menu.
+#[test]
+fn select_gap_then_ripple_delete_from_the_edit_menu() {
+    let (mut d, a, b) = Driver::two_clips();
+    let f48 = d.frame(48);
+    let g = d.ok("engine.execute", json!({"command": "timeline.selectGap", "params": {"track": "V1", "frame": 60}}));
+    assert_eq!(g["start"].as_i64(), Some(f48));
+    d.frames(2);
+    assert!(d.rect("timeline.gap").is_some(), "the selected gap is highlighted");
+    d.ok("ui.menu.invoke", json!({"id": "edit.rippleDelete"}));
+    d.frames(3);
+    assert_eq!((d.start(a), d.start(b)), (0, f48));
+    assert_eq!(d.gap(), Value::Null);
+}

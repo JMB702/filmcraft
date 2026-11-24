@@ -1392,3 +1392,250 @@ fn trim_caption_shorter_than_min_duration_does_not_cross_bounds() {
         assert!(c.duration >= Tick(1000), "{edge:?}: caption shrank: {:?}", c.duration);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Ripple Delete on a selected gap (`close_gap`), as in Premiere Pro
+// ---------------------------------------------------------------------------------------------
+
+/// Link two clips as picture and sound of one source.
+fn link(fx: &mut Fx, a: ClipId, b: ClipId, group: u64) {
+    for c in [a, b] {
+        fx.seq.find_item_mut(c).unwrap().1.link = Some(group);
+    }
+}
+
+fn start_of(fx: &Fx, c: ClipId) -> i64 {
+    R.frame_at(fx.seq.find_item(c).unwrap().1.start)
+}
+
+#[test]
+fn close_gap_before_the_first_clip() {
+    let mut fx = Fx::new();
+    let v1 = fx.v(0);
+    fx.put(v1, 10, 10, 0);
+    fx.put(v1, 30, 10, 0);
+    let gap = close_gap(&mut fx.seq, v1, f(5)).unwrap();
+    assert_eq!(gap, TimeRange::from_bounds(f(0), f(10)), "the empty time from the sequence start is a gap");
+    assert_eq!(fx.spans(v1), vec![(0, 10), (20, 10)], "everything moves up by the gap, the later gap stays");
+    fx.seq.check().unwrap();
+}
+
+#[test]
+fn close_gap_between_two_clips_returns_the_closed_range() {
+    let mut fx = Fx::new();
+    let v1 = fx.v(0);
+    fx.put(v1, 0, 10, 0);
+    fx.put(v1, 25, 10, 0);
+    fx.put(v1, 50, 10, 0);
+    assert_eq!(closable_gap(&fx.seq, v1, f(12)), Ok(TimeRange::from_bounds(f(10), f(25))));
+    let gap = close_gap(&mut fx.seq, v1, f(12)).unwrap();
+    assert_eq!(gap, TimeRange::from_bounds(f(10), f(25)));
+    assert_eq!(fx.spans(v1), vec![(0, 10), (10, 10), (35, 10)]);
+}
+
+#[test]
+fn the_time_after_the_last_clip_or_inside_a_clip_is_not_a_gap() {
+    let mut fx = Fx::new();
+    let v1 = fx.v(0);
+    fx.put(v1, 0, 10, 0);
+    fx.put(v1, 25, 10, 0);
+    let before = fx.seq.clone();
+    assert_eq!(close_gap(&mut fx.seq, v1, f(40)), Err(EditError::Nothing), "after the last clip");
+    assert_eq!(close_gap(&mut fx.seq, v1, f(5)), Err(EditError::Nothing), "inside a clip");
+    let v3 = fx.v(2);
+    assert_eq!(close_gap(&mut fx.seq, v3, f(5)), Err(EditError::Nothing), "an empty track");
+    assert_eq!(close_gap(&mut fx.seq, TrackId(987_654), f(5)), Err(EditError::NoTrack(TrackId(987_654))));
+    assert_eq!(fx.seq, before);
+}
+
+/// Every unlocked sync-locked track moves by the same amount, so V2's title and A1's music after
+/// the gap stay lined up with V1.
+#[test]
+fn close_gap_keeps_the_other_sync_locked_tracks_in_sync() {
+    let mut fx = Fx::new();
+    let (v1, v2, a1, a2) = (fx.v(0), fx.v(1), fx.a(0), fx.a(1));
+    fx.put(v1, 0, 10, 0);
+    let b = fx.put(v1, 25, 10, 0);
+    let title = fx.put(v2, 40, 5, 0);
+    let early = fx.put(v2, 2, 5, 0);
+    let music = fx.put(a1, 25, 30, 0);
+    let a2_end = fx.put(a2, 0, 10, 0);
+    close_gap(&mut fx.seq, v1, f(15)).unwrap();
+    assert_eq!(start_of(&fx, b), 10);
+    assert_eq!(start_of(&fx, title), 25, "V2 after the gap moves with V1");
+    assert_eq!(start_of(&fx, early), 2, "V2 before the gap stays");
+    assert_eq!(start_of(&fx, music), 10, "A1 moves with V1");
+    assert_eq!(start_of(&fx, a2_end), 0, "A2 ends before the gap: nothing to move");
+    fx.seq.check().unwrap();
+}
+
+/// A sync-locked track with a clip in the gap's time blocks the edit (Premiere's "media is in the
+/// way"); its name is in the error and nothing changes. A track that is not sync-locked stays put
+/// and blocks nothing.
+#[test]
+fn close_gap_is_refused_when_media_is_in_the_way() {
+    let mut fx = Fx::new();
+    let (v1, a2) = (fx.v(0), fx.a(1));
+    fx.put(v1, 0, 10, 0);
+    let b = fx.put(v1, 25, 10, 0);
+    let bed = fx.put(a2, 5, 40, 0);
+    let before = fx.seq.clone();
+    assert_eq!(closable_gap(&fx.seq, v1, f(15)), Err(EditError::GapBlocked("A2".into())));
+    let err = close_gap(&mut fx.seq, v1, f(15)).unwrap_err();
+    assert_eq!(err, EditError::GapBlocked("A2".into()));
+    let msg = err.to_string();
+    assert!(msg.contains("A2") && msg.contains("gap") && msg.contains("sync lock"), "a plain reason: {msg}");
+    assert_eq!(fx.seq, before, "a refused edit changes nothing");
+
+    fx.seq.track_mut(a2).unwrap().sync_lock = false;
+    close_gap(&mut fx.seq, v1, f(15)).unwrap();
+    assert_eq!(start_of(&fx, b), 10);
+    assert_eq!(start_of(&fx, bed), 5, "a track that is not sync-locked stays put");
+    fx.seq.check().unwrap();
+}
+
+/// Locked tracks never move and block nothing; a gap on a locked track can't close.
+#[test]
+fn close_gap_with_locked_tracks() {
+    let mut fx = Fx::new();
+    let (v1, v2) = (fx.v(0), fx.v(1));
+    fx.put(v1, 0, 10, 0);
+    let b = fx.put(v1, 25, 10, 0);
+    let across = fx.put(v2, 5, 40, 0);
+    fx.seq.track_mut(v2).unwrap().locked = true;
+    close_gap(&mut fx.seq, v1, f(15)).unwrap();
+    assert_eq!(start_of(&fx, b), 10, "a locked track's clip in the gap does not block");
+    assert_eq!(start_of(&fx, across), 5, "and the locked track does not move");
+
+    fx.seq.track_mut(v2).unwrap().locked = false;
+    fx.put(v1, 40, 10, 0);
+    fx.seq.track_mut(v1).unwrap().locked = true;
+    let before = fx.seq.clone();
+    assert_eq!(close_gap(&mut fx.seq, v1, f(30)), Err(EditError::Locked), "a gap on a locked track");
+    assert_eq!(fx.seq, before);
+}
+
+/// Linked sound on a sync-locked track moves with its picture. On a track that is not
+/// sync-locked it would stay behind, out of sync, so the edit is refused; on a locked track it
+/// blocks nothing.
+#[test]
+fn close_gap_moves_linked_sound_or_refuses_to_break_it() {
+    let mut fx = Fx::new();
+    let (v1, a1) = (fx.v(0), fx.a(0));
+    let (p1, s1) = (fx.put(v1, 0, 10, 0), fx.put(a1, 0, 10, 0));
+    let (p2, s2) = (fx.put(v1, 25, 10, 0), fx.put(a1, 25, 10, 0));
+    link(&mut fx, p1, s1, 1);
+    link(&mut fx, p2, s2, 2);
+
+    let mut synced = Fx { seq: fx.seq.clone(), next: fx.next };
+    close_gap(&mut synced.seq, v1, f(15)).unwrap();
+    assert_eq!((start_of(&synced, p2), start_of(&synced, s2)), (10, 10), "picture and linked sound move together");
+
+    fx.seq.track_mut(a1).unwrap().sync_lock = false;
+    let before = fx.seq.clone();
+    let err = close_gap(&mut fx.seq, v1, f(15)).unwrap_err();
+    assert_eq!(err, EditError::LinkedOutOfSync("A1".into()));
+    assert!(err.to_string().contains("out of sync"), "{err}");
+    assert_eq!(fx.seq, before);
+    // the sound's own gap is on the track that moves, and its picture's track is sync-locked
+    close_gap(&mut fx.seq, a1, f(15)).unwrap();
+    assert_eq!((start_of(&fx, p2), start_of(&fx, s2)), (10, 10), "closing it on A1 moves V1 (sync-locked) too");
+
+    let mut locked = Fx { seq: before.clone(), next: fx.next };
+    locked.seq.track_mut(a1).unwrap().locked = true;
+    close_gap(&mut locked.seq, v1, f(15)).unwrap();
+    assert_eq!((start_of(&locked, p2), start_of(&locked, s2)), (10, 25), "a locked track blocks nothing and stays put");
+}
+
+/// Clip markers ride on their clips; transitions on a rippled track move with the clips.
+#[test]
+fn close_gap_carries_clip_markers_and_transitions() {
+    let mut fx = Fx::new();
+    let v1 = fx.v(0);
+    fx.put(v1, 0, 10, 0);
+    let b = fx.put(v1, 25, 10, 20);
+    let c = fx.put(v1, 35, 10, 40);
+    let marker = filmcraft_project::Marker {
+        url: String::new(),
+        author: String::new(),
+        custom_color: None,
+        id: filmcraft_project::MarkerId(7),
+        start: f(23),
+        duration: Tick::ZERO,
+        name: "beat".into(),
+        comment: String::new(),
+        kind: Default::default(),
+        color: Label::Iris,
+    };
+    fx.seq.find_item_mut(b).unwrap().1.markers.push(marker.clone());
+    fx.seq.track_mut(v1).unwrap().transitions = vec![Transition {
+        id: TransitionId(1),
+        effect: filmcraft_project::find_effect("cross_dissolve").unwrap().instance(),
+        start: f(33),
+        duration: f(4),
+        from: Some(b),
+        to: Some(c),
+        align: Default::default(),
+        reverse: false,
+    }];
+    let tid = TransitionId(1);
+    let tr_start = fx.seq.track(v1).unwrap().transitions.iter().find(|t| t.id == tid).unwrap().start;
+    close_gap(&mut fx.seq, v1, f(15)).unwrap();
+    let (_, moved) = fx.seq.find_item(b).unwrap();
+    assert_eq!((R.frame_at(moved.start), moved.markers.clone()), (10, vec![marker]), "the clip's marker comes along");
+    let t = fx.seq.track(v1).unwrap().transitions.iter().find(|t| t.id == tid).unwrap();
+    assert_eq!(t.start, tr_start - f(15), "the transition stays on its cut");
+    fx.seq.check().unwrap();
+}
+
+/// Sync-locked caption tracks move with the gap (as they follow Ripple Delete); a caption in the
+/// gap's time blocks it like a clip would. Locked or unsynced caption tracks stay and block nothing.
+#[test]
+fn close_gap_moves_sync_locked_captions() {
+    let mut fx = Fx::new();
+    let v1 = fx.v(0);
+    let c1 = fx.add_caption_track("C1", CaptionFormat::Subtitle);
+    let c2 = fx.add_caption_track("C2", CaptionFormat::Subtitle);
+    fx.put(v1, 0, 10, 0);
+    fx.put(v1, 25, 10, 0);
+    fx.add_caption(c1, 2, 4, "before");
+    fx.add_caption(c1, 26, 4, "after");
+    fx.add_caption(c2, 26, 4, "unsynced");
+    fx.seq.caption_track_mut(c2).unwrap().sync_lock = false;
+    close_gap(&mut fx.seq, v1, f(15)).unwrap();
+    assert_eq!(fx.caption_spans(c1), vec![(2, 4, "before".into()), (11, 4, "after".into())]);
+    assert_eq!(fx.caption_spans(c2), vec![(11 + 15, 4, "unsynced".into())], "not sync-locked: stays");
+
+    // a caption in the gap is in the way
+    let mut fx = Fx::new();
+    let v1 = fx.v(0);
+    let c1 = fx.add_caption_track("C1", CaptionFormat::Subtitle);
+    fx.put(v1, 0, 10, 0);
+    let b = fx.put(v1, 25, 10, 0);
+    fx.add_caption(c1, 12, 4, "in the gap");
+    let before = fx.seq.clone();
+    assert_eq!(close_gap(&mut fx.seq, v1, f(15)), Err(EditError::GapBlocked("C1".into())));
+    assert_eq!(fx.seq, before);
+    fx.seq.caption_track_mut(c1).unwrap().locked = true;
+    close_gap(&mut fx.seq, v1, f(15)).unwrap();
+    assert_eq!(start_of(&fx, b), 10);
+    assert_eq!(fx.caption_spans(c1), vec![(12, 4, "in the gap".into())], "a locked caption track stays");
+}
+
+/// Every refusal leaves the sequence exactly as it was (the engine then has nothing to undo), and
+/// closing then reopening the gap by an insert restores the clip positions.
+#[test]
+fn close_gap_refusals_change_nothing() {
+    let mut fx = Fx::new();
+    let (v1, a1) = (fx.v(0), fx.a(0));
+    let c1 = fx.add_caption_track("C1", CaptionFormat::Subtitle);
+    fx.put(v1, 0, 10, 0);
+    fx.put(v1, 25, 10, 0);
+    fx.put(a1, 12, 2, 0);
+    fx.add_caption(c1, 30, 2, "later");
+    let before = fx.seq.clone();
+    for t in [f(15), f(5), f(60), -f(5), Tick(i64::MAX), Tick(i64::MIN)] {
+        assert!(close_gap(&mut fx.seq, v1, t).is_err());
+        assert_eq!(fx.seq, before, "at {t:?}");
+    }
+}
