@@ -661,6 +661,8 @@ fn make_subsequence(s: &mut Session, p: &Value) -> Result<Value> {
 /// one nested clip. As in Premiere, the clips come with their transitions and links; the source's
 /// tracks that hold clips go to consecutive tracks from `vdest` / `adest` up (source V1 and V3
 /// land on the destination track and the one above it), and tracks that are missing are added.
+/// A source track that holds clips, but none in `range`, still takes its lane: the tracks below
+/// it don't move up.
 /// A kind without a destination track is left out.
 pub(crate) fn place_sequence_clips(s: &mut Session, placement: crate::commands::ItemPlacement<'_>) -> Result<Vec<ClipId>> {
     let crate::commands::ItemPlacement { item, range, at, vdest, adest, insert, label, .. } = placement;
@@ -677,14 +679,20 @@ pub(crate) fn place_sequence_clips(s: &mut Session, placement: crate::commands::
     for (kind, tracks, dest) in [(TrackKind::Video, &src.video_tracks, vdest), (TrackKind::Audio, &src.audio_tracks, adest)] {
         let Some(first) = dest.and_then(|d| dst.tracks(kind).iter().position(|t| t.id == d)) else { continue };
         base.insert(audio(kind), first);
+        // A track empty in the whole source takes no lane (Premiere packs those); one that holds
+        // clips elsewhere keeps its lane even where `range` misses them, so a source track lands on
+        // the same destination track whatever part of the source is placed (a mic track empty for a
+        // stretch must not shift the mic below it up onto its track).
         let mut lane = 0;
         for (ti, tr) in tracks.iter().enumerate() {
-            let clips: Vec<TrackItem> = tr.items.iter().filter_map(|it| edit::through::clip_item_to(it, range)).collect();
-            if clips.is_empty() {
+            if tr.items.is_empty() {
                 continue;
             }
-            lanes.insert((audio(kind), ti), lane);
-            items.extend(clips.into_iter().map(|c| (kind, lane, c)));
+            let clips: Vec<TrackItem> = tr.items.iter().filter_map(|it| edit::through::clip_item_to(it, range)).collect();
+            if !clips.is_empty() {
+                lanes.insert((audio(kind), ti), lane);
+                items.extend(clips.into_iter().map(|c| (kind, lane, c)));
+            }
             lane += 1;
         }
     }

@@ -1526,7 +1526,12 @@ impl Session {
         if self.state.sequences_as_clips
             && let Some(q) = pi.as_sequence().filter(|q| q.multicam.is_none())
         {
-            let lanes = |tracks: &[Track]| tracks.iter().filter(|t| t.items.iter().any(|it| edit::through::clip_item_to(it, range).is_some())).count();
+            // as `place_sequence_clips`: every track that holds clips anywhere takes a lane, up to
+            // the last one with clips in `range`
+            let lanes = |tracks: &[Track]| {
+                let used: Vec<&Track> = tracks.iter().filter(|t| !t.items.is_empty()).collect();
+                used.iter().rposition(|t| t.items.iter().any(|it| edit::through::clip_item_to(it, range).is_some())).map_or(0, |i| i + 1)
+            };
             return (if video { lanes(&q.video_tracks) } else { 0 }, if audio { lanes(&q.audio_tracks) } else { 0 });
         }
         let (has_video, has_audio) = self.project.source_streams(item);

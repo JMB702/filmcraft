@@ -228,3 +228,43 @@ fn mark_in_and_out_in_the_source_monitor_mark_a_sequence_like_a_clip() {
     let q = s.project.sequence(source).unwrap();
     assert_eq!((q.mark_in, q.mark_out), (None, None));
 }
+
+/// With the nest toggle off, a source track that holds clips, but none in the placed part, keeps
+/// its lane: the mic on source A3 lands on A3, not on A2 because A2 is empty for that stretch
+/// (Ren-fair: a multicam's Tanner mic WAVs landed on the Jeff mic track six times).
+#[test]
+fn as_clips_a_track_empty_only_in_the_placed_part_keeps_its_lane() {
+    let mut s = demo();
+    let (source, target) = source_and_empty(&mut s);
+    let rate = s.sequence_rate();
+    // in the source: the first clip's sound on A2, the third clip's sound on A3
+    s.execute("sequence.open", json!({"item": source.0})).unwrap();
+    let a1 = clips(&s, TrackKind::Audio, 0);
+    assert_eq!(a1.len(), 3, "the subsequence carries the three clips' sound");
+    let (first, third) = (a1[0].clone(), a1[2].clone());
+    s.execute(
+        "timeline.move",
+        json!({"moves": [{"clip": first.id.0, "track": "A2", "time": first.start.0}, {"clip": third.id.0, "track": "A3", "time": third.start.0}], "linked": false}),
+    )
+    .unwrap();
+    assert_eq!((clips(&s, TrackKind::Audio, 1).len(), clips(&s, TrackKind::Audio, 2).len()), (1, 1));
+    // place only the third clip's stretch: there, source A1 and A2 are empty and A3 has sound
+    s.execute("sequence.open", json!({"item": target.0})).unwrap();
+    s.execute("sequence.nestSequences", json!({"on": false})).unwrap();
+    let fd = rate.frame_duration().0;
+    let (in_frame, frames) = (third.start.0 / fd, third.duration.0 / fd);
+    s.execute(
+        "timeline.place",
+        json!({"item": source.0, "track": "V1", "audioTrack": "A1", "frame": 0, "sourceIn": {"frame": in_frame}, "duration": {"frame": frames}}),
+    )
+    .unwrap();
+    let q = s.active_sequence().unwrap();
+    q.check().unwrap();
+    let counts: Vec<usize> = q.audio_tracks.iter().map(|t| t.items.len()).collect();
+    assert_eq!(counts.get(2).copied(), Some(1), "the A3 sound lands on A3: {counts:?}");
+    assert_eq!(counts.iter().take(2).sum::<usize>(), 0, "A1 and A2 stay empty: {counts:?}");
+    assert_eq!(q.audio_tracks[2].items[0].item, third.item);
+    // the drop preview counts the same lanes (A1 to A3)
+    let range = TimeRange::new(third.start, third.duration);
+    assert_eq!(s.placement_lanes(source, range, true, true).1, 3);
+}
