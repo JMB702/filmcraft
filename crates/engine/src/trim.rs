@@ -304,7 +304,13 @@ pub fn to_playhead(s: &mut Session, p: &Value) -> Result<Value> {
     let ripple = p.get("ripple").and_then(Value::as_bool).unwrap_or(true);
     let ph = s.playhead();
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
-    let under = |t: &filmcraft_project::Track, keep: &dyn Fn(ClipId) -> bool| t.items.iter().any(|i| i.start < ph && ph < i.end() && keep(i.id));
+    // The clip on the trimmed side of the playhead. Strictly inside a clip, that clip; on a cut, the
+    // clip starting there for Next (it is trimmed away whole) and the one ending there for
+    // Previous, so a track with a cut at the playhead is trimmed like the others instead of being
+    // skipped, which left the tracks without a cut rippled alone, out of sync.
+    let under = |t: &filmcraft_project::Track, keep: &dyn Fn(ClipId) -> bool| {
+        t.items.iter().any(|i| if next { i.start <= ph && ph < i.end() } else { i.start < ph && ph <= i.end() } && keep(i.id))
+    };
     // Like Add Edit: selected clips under the playhead (and their linked partners) are trimmed,
     // and only their tracks (#164); with none, the targeted tracks are.
     let sel = crate::commands::with_links(s, &s.state.selection);

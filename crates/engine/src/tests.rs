@@ -994,6 +994,39 @@ fn ripple_trim_to_playhead_q_w() {
     assert_eq!(s.playhead(), start2, "playhead parks on the new edit");
 }
 
+/// With the playhead exactly on a cut, W removes the clip that starts there and Q the clip that
+/// ends there, rippling the rest; neither refuses or skips the track with the cut.
+#[test]
+fn ripple_trim_to_playhead_on_a_cut() {
+    let mut s = demo_unlocked();
+    let clips = v1(&s);
+    assert!(clips.len() >= 3, "demo has three clips on V1");
+    // W on the cut between clips 0 and 1: clip 1 goes, clip 2 moves up to the cut
+    let (_, cut, _) = clips[1];
+    let (id2, s2, e2) = clips[2];
+    let d0 = s.active_sequence().unwrap().duration();
+    let len1 = clips[1].2 - clips[1].1;
+    s.execute("playhead.set", json!({"time": cut.0})).unwrap();
+    s.execute("trim.rippleNext", json!({})).unwrap();
+    let after = v1(&s);
+    assert!(after.iter().all(|c| c.0 != clips[1].0), "the clip starting at the cut was removed: {after:?}");
+    let c2 = after.iter().find(|c| c.0 == id2).unwrap();
+    assert_eq!((c2.1, c2.2), (cut, cut + (e2 - s2)), "the next clip rippled up to the cut");
+    assert_eq!(s.active_sequence().unwrap().duration(), d0 - len1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(v1(&s), clips, "one undo step");
+    // Q on the same cut: clip 0 goes, clip 1 moves to clip 0's start, playhead parks there
+    let (id0, s0, e0) = clips[0];
+    s.execute("playhead.set", json!({"time": cut.0})).unwrap();
+    s.execute("trim.ripplePrevious", json!({})).unwrap();
+    let after = v1(&s);
+    assert!(after.iter().all(|c| c.0 != id0), "the clip ending at the cut was removed: {after:?}");
+    let c1 = after.iter().find(|c| c.0 == clips[1].0).unwrap();
+    assert_eq!(c1.1, s0, "the clip after the cut rippled back to where the removed one started");
+    assert_eq!(s.active_sequence().unwrap().duration(), d0 - (e0 - s0));
+    assert_eq!(s.playhead(), s0, "playhead parks on the new edit");
+}
+
 #[test]
 fn interchange_roundtrip_through_files() {
     let dir = std::env::temp_dir().join(format!("fc-ix-{}", std::process::id()));
